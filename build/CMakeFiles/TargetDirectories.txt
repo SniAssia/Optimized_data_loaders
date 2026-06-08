@@ -1,0 +1,3 @@
+/Users/mac/Desktop/fixed_project/build/CMakeFiles/dataloader_test.dir
+/Users/mac/Desktop/fixed_project/build/CMakeFiles/edit_cache.dir
+/Users/mac/Desktop/fixed_project/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/dataloader_test.dir/main.cpp.o -o dataloader_test  -Wl,-rpath,/Users/mac/Desktop/libtorch/lib /Users/mac/Desktop/libtorch/lib/libc10.dylib /Users/mac/Desktop/libtorch/lib/libtorch.dylib /Users/mac/Desktop/libtorch/lib/libtorch_cpu.dylib /Users/mac/Desktop/libtorch/lib/libc10.dylib
