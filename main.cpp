@@ -8,6 +8,7 @@
 //   ./build/dataloader_test instructions.bin responses.bin
 
 #include "distributed.h"
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -129,7 +130,7 @@ int main(int argc, char* argv[]) {
     // GPU memory baseline
     int64_t gpu_mem_start = 0;
     if (torch::cuda::is_available())
-        gpu_mem_start = torch::cuda::memory_allocated(device.index());
+        gpu_mem_start = c10::cuda::CUDACachingAllocator::getDeviceStats(device.index()).allocated_bytes[0].current;
 
     // ── per-batch header ─────────────────────────────────────────────
     print_separator();
@@ -283,8 +284,9 @@ int main(int argc, char* argv[]) {
 
     // ── GPU memory ───────────────────────────────────────────────────
     if (torch::cuda::is_available()) {
-        int64_t mem_now      = torch::cuda::memory_allocated(device.index());
-        int64_t mem_reserved = torch::cuda::memory_reserved(device.index());
+        auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device.index());
+        int64_t mem_now      = stats.allocated_bytes[0].current;
+        int64_t mem_reserved = stats.reserved_bytes[0].current;
         print_separator();
         std::cout << "  GPU MEMORY (device " << device.index() << ")\n";
         print_separator();
