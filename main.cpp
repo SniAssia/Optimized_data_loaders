@@ -10,7 +10,7 @@
 //
 //  Run:
 //    ./build/dataloader_test instructions.bin responses.bin
-
+#include "distributed.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
         int64_t L = batch.input_ids.size(1);
 
         total_tokens  += B * L;
-        double pad_pct = 1.0 - batch.attention_mask.to(torch::kFloat32).mean().item<float>();
+        double pad_pct = 1.0 - batch.attention_mask.to(torch::kFloat32).mean().template item<float>();
         padding_waste += pad_pct;
 
         if (batch_count < 5) {
