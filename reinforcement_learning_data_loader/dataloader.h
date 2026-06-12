@@ -1,18 +1,13 @@
 #pragma once
-// ============================================================
-// dataloader.h — Mode-aware factory
-// ============================================================
-//
-// Wires together: UnifiedDatasetReader -> UnifiedDataset
-//                  -> shard_indices -> BucketBatchSampler
-//                  -> UnifiedCollator -> TypedPrefetcher<BatchT>
-//
-// One build_*_dataloader() function per mode, plus a single
-// entry point build_dataloader() that dispatches on cfg.mode
-// and returns the SFT prefetcher (legacy path) for backward
-// compatibility. For RL / preference modes, call the mode
-// specific factory directly so the return type is concrete.
-// ============================================================
+//  dataloader.h — Mode-aware factory
+//Wires together: UnifiedDatasetReader -> UnifiedDataset
+//   -> shard_indices -> BucketBatchSampler
+//          -> UnifiedCollator -> TypedPrefetcher<BatchT>
+// .  One build_*_dataloader() function per mode, plus a single
+//entry point build_dataloader() that dispatches on cfg.mode
+//  and returns the SFT prefetcher (legacy path) for backward
+//   compatibility. For RL / preference modes, call the mode
+//specific factory directly so the return type is concrete.
 
 #include "dataset.h"
 #include "sampler.h"
@@ -23,12 +18,8 @@
 #include <memory>
 
 namespace dl {
-
-// ─────────────────────────────────────────────────────────────
-// Shared helper: build dataset + sampler for any mode
-// ─────────────────────────────────────────────────────────────
+// build dataset + sampler for any mode
 namespace detail {
-
 inline std::shared_ptr<BucketBatchSampler> make_sampler(
     const UnifiedDataset& dataset,
     const DataLoaderConfig& cfg,
@@ -51,15 +42,12 @@ inline std::shared_ptr<BucketBatchSampler> make_sampler(
         epoch);
 }
 
-} // namespace detail
-
-// ─────────────────────────────────────────────────────────────
+} 
 // SFT dataloader
-// ─────────────────────────────────────────────────────────────
 inline std::unique_ptr<SFTPrefetcher> build_sft_dataloader(
-    std::shared_ptr<UnifiedDataset> dataset,
+      std::shared_ptr<UnifiedDataset> dataset,
     const DataLoaderConfig& cfg,
-    int rank = 0, int world_size = 1, int64_t epoch = 0,
+      int rank = 0, int world_size = 1, int64_t epoch = 0,
     torch::Device device = torch::kCPU)
 {
     auto sampler = detail::make_sampler(*dataset, cfg, rank, world_size, epoch);
@@ -78,10 +66,7 @@ inline std::unique_ptr<SFTPrefetcher> build_sft_dataloader(
         std::move(fn), *sampler, device,
         cfg.num_workers, static_cast<std::size_t>(cfg.prefetch_factor));
 }
-
-// ─────────────────────────────────────────────────────────────
-// Reward model dataloader — (prompt, chosen, rejected), no labels
-// ─────────────────────────────────────────────────────────────
+// Reward model dataloader (prompt, chosen, rejected), no labels
 inline std::unique_ptr<RewardModelPrefetcher> build_reward_model_dataloader(
     std::shared_ptr<UnifiedDataset> dataset,
     const DataLoaderConfig& cfg,
@@ -104,10 +89,7 @@ inline std::unique_ptr<RewardModelPrefetcher> build_reward_model_dataloader(
         std::move(fn), *sampler, device,
         cfg.num_workers, static_cast<std::size_t>(cfg.prefetch_factor));
 }
-
-// ─────────────────────────────────────────────────────────────
 // DPO dataloader — (prompt, chosen, rejected), with labels
-// ─────────────────────────────────────────────────────────────
 inline std::unique_ptr<DPOPrefetcher> build_dpo_dataloader(
     std::shared_ptr<UnifiedDataset> dataset,
     const DataLoaderConfig& cfg,
@@ -130,13 +112,10 @@ inline std::unique_ptr<DPOPrefetcher> build_dpo_dataloader(
         std::move(fn), *sampler, device,
         cfg.num_workers, static_cast<std::size_t>(cfg.prefetch_factor));
 }
-
-// ─────────────────────────────────────────────────────────────
 // Rollout dataloader — prompt-only, left-padded + gen space
 // Used by both PPO and GRPO. cfg.grpo_group_size is carried in
 // the config purely for the training loop's benefit; the data
 // loader itself never reads it.
-// ─────────────────────────────────────────────────────────────
 inline std::unique_ptr<RolloutPrefetcher> build_rollout_dataloader(
     std::shared_ptr<UnifiedDataset> dataset,
     const DataLoaderConfig& cfg,
@@ -159,11 +138,8 @@ inline std::unique_ptr<RolloutPrefetcher> build_rollout_dataloader(
         std::move(fn), *sampler, device,
         cfg.num_workers, static_cast<std::size_t>(cfg.prefetch_factor));
 }
-
-// ─────────────────────────────────────────────────────────────
 // Single entry point for callers that load data and then pick
 // the right factory based on cfg.mode at runtime.
-//
 // Usage:
 //   auto samples = UnifiedDatasetReader::load(cfg);
 //   auto dataset = std::make_shared<UnifiedDataset>(std::move(samples), cfg);
@@ -183,8 +159,6 @@ inline std::unique_ptr<RolloutPrefetcher> build_rollout_dataloader(
 // because each mode legitimately returns a different Batch type
 // — exactly the boundary described in the architecture: the
 // data loader is mode-aware only at the collator/factory layer.
-// ─────────────────────────────────────────────────────────────
-
 // ── Backward-compat: original SFT-only entry point ───────────
 inline std::unique_ptr<CUDAPrefetcher> build_dataloader(
     const InstructionDataset& dataset_legacy,
@@ -204,35 +178,40 @@ inline std::unique_ptr<CUDAPrefetcher> build_dataloader(
     return build_sft_dataloader(dataset, sft_cfg, rank, world_size, epoch, device);
 }
 
-} // namespace dl
-
-// ============================================================
+}
 // Pipeline overview
-// ============================================================
-//
 // [Python] tokenize_dataset.py --mode {sft|reward_model|dpo|rollout}
 //      │
 //      │ prompts.bin (+ responses.bin | chosen.bin/rejected.bin)
-//      ▼
-// UnifiedDatasetReader::load(cfg)          (reads only what mode needs)
+//      
+// UnifiedDatasetReader::load(cfg)   (reads only what mode needs)
 //      │  std::vector<RawSample>
-//      ▼
-// UnifiedDataset(samples, cfg)             (mode-specific truncation + lengths)
+//      
+// UnifiedDataset(samples, cfg)      (mode-specific truncation + lengths)
 //      │  dataset.lengths()
-//      ▼
+//      
 // shard_indices(total, rank, world_size, ...)
 //      │  shard (indices for this rank)
-//      ▼
+//      
 // BucketBatchSampler(lengths, batch_size, buckets, shard)
 //      │  batches() -> vector<vector<int64_t>>
-//      ▼
-// UnifiedCollator::collate_*(items)        (mode-specific batch struct)
-//      ▼
+//      
+// UnifiedCollator::collate_*(items)  (mode-specific batch struct)
+//      
 // TypedPrefetcher<BatchT>(collate_fn, sampler, device)
 //      │  .next() -> optional<BatchT>  (GPU)
-//      ▼
+//      
 // Training loop
 //   SFT / REWARD_MODEL / DPO -> complete batch, run loss directly
-//   ROLLOUT (PPO/GRPO)       -> prompt batch only; rollout buffer
-//                                handles everything generated after
-// ============================================================
+//   ROLLOUT (PPO/GRPO)  -> prompt batch only; rollout buffer
+//                         handles everything generated after
+
+
+
+
+
+
+
+
+
+
