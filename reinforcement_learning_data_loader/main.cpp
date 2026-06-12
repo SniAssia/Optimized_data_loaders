@@ -1,7 +1,4 @@
-// ============================================================
 // main.cpp — Example usage of the unified post-training data loader
-// ============================================================
-//
 // Demonstrates how to build a dataloader for each TrainingMode
 // and shows where the rollout buffer fits into a PPO-style loop.
 //
@@ -15,7 +12,6 @@
 //   ./dataloader_demo reward_model
 //   ./dataloader_demo dpo
 //   ./dataloader_demo rollout
-// ============================================================
 
 #include "dataset.h"
 #include "sampler.h"
