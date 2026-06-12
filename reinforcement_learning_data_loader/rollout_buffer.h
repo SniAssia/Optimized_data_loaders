@@ -1,59 +1,46 @@
 #pragma once
-// ============================================================
 // rollout_buffer.h — In-memory Rollout Buffer (PPO / GRPO)
-// ============================================================
-//
 // The RolloutBuffer sits between the two inner phases of PPO
 // and GRPO:
-//
 //   Phase A (rollout collection)
 //     Training loop calls push() after each rollout batch:
-//       • prompt_ids        (B, prompt_len+gen_len)
-//       • response_ids      (B, gen_len)
-//       • old_log_probs     (B, gen_len)  — actor log-probs at rollout
-//       • ref_log_probs     (B, gen_len)  — reference model log-probs
-//       • rewards           (B,)          — from reward model / rule
-//       • advantages        (B, gen_len)  — computed via GAE or group stats
+//       prompt_ids        (B, prompt_len+gen_len)
+//         response_ids      (B, gen_len)
+//         old_log_probs     (B, gen_len)  — actor log-probs at rollout
+//        ref_log_probs     (B, gen_len)  — reference model log-probs
+//         rewards           (B,)          — from reward model / rule
+//      advantages        (B, gen_len)  — computed via GAE or group stats
 //
 //   Phase B (update epochs)
 //     Training loop calls next_minibatch() to iterate over
 //     the stored data in gradient-update-sized mini-batches.
 //     Call clear() after all PPO epochs to reset for the next
 //     rollout collection phase.
-//
 // GRPO note:
 //   For GRPO the training loop expands each prompt to G copies
 //   before pushing.  The buffer is agnostic to this: it stores
 //   whatever tensors it receives.  After expansion the effective
 //   batch dimension seen by the buffer is B × G.
-// ============================================================
 
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
 #include <vector>
-
 #include <torch/torch.h>
 
 namespace dl
 {
-
-    // ─────────────────────────────────────────────────────────────
     // Per-step entry pushed by the training loop
-    // ─────────────────────────────────────────────────────────────
     struct RolloutEntry
     {
-        torch::Tensor prompt_ids;    // (B, prompt_len + gen_len)  — CPU or GPU
-        torch::Tensor response_ids;  // (B, gen_len)
-        torch::Tensor old_log_probs; // (B, gen_len)
-        torch::Tensor ref_log_probs; // (B, gen_len)
+        torch::Tensor prompt_ids;       // (B, prompt_len + gen_len)  — CPU or GPU
+        torch::Tensor response_ids;// (B, gen_len)
+        torch::Tensor old_log_probs;  // (B, gen_len)
+        torch::Tensor ref_log_probs;   // (B, gen_len)
         torch::Tensor rewards;       // (B,)
         torch::Tensor advantages;    // (B, gen_len)
     };
-
-    // ─────────────────────────────────────────────────────────────
     // Mini-batch returned during the update phase
-    // ─────────────────────────────────────────────────────────────
     struct RolloutMiniBatch
     {
         torch::Tensor prompt_ids;
@@ -63,10 +50,7 @@ namespace dl
         torch::Tensor rewards;
         torch::Tensor advantages;
     };
-
-    // ─────────────────────────────────────────────────────────────
     // RolloutBuffer
-    // ─────────────────────────────────────────────────────────────
     class RolloutBuffer
     {
     public:
@@ -79,7 +63,7 @@ namespace dl
         {
         }
 
-        // ── Write phase ──────────────────────────────────────────
+        //  Write phase
 
         // Append one rollout batch.  All tensors must have the same
         // leading batch dimension.  Call as many times as needed.
@@ -136,7 +120,7 @@ namespace dl
             perm_ = torch::randperm(total_samples_);
         }
 
-        // ── Read phase ───────────────────────────────────────────
+        //  Read phase 
 
         // Returns the next mini-batch, or nullopt when one epoch
         // over the buffer is complete.  Call seal() before first use.
@@ -221,4 +205,4 @@ namespace dl
         torch::Tensor perm_; // shuffled index permutation
     };
 
-} // namespace dl
+} 
