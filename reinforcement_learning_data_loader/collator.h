@@ -18,21 +18,18 @@ namespace dl {
 // SFT batch  (same as original Batch, kept compatible)
 struct SFTBatch {
     torch::Tensor input_ids;       // (B, L)
-    torch::Tensor attention_mask;  // (B, L)
-    torch::Tensor labels;          // (B, L)  prompt tokens = -100
+    torch::Tensor attention_mask; 
+    torch::Tensor labels;         // prompt tokens = -100
 };
 using Batch = SFTBatch;  // backward compat alias
-// Reward model batch — no labels; chosen/rejected padded independently
 struct RewardModelBatch {
-    torch::Tensor chosen_input_ids;      // (B, L_chosen)
-    torch::Tensor chosen_attention_mask; // (B, L_chosen)
-    torch::Tensor rejected_input_ids;    // (B, L_rejected)
-    torch::Tensor rejected_attention_mask; // (B, L_rejected)
+    torch::Tensor chosen_input_ids;      
+    torch::Tensor chosen_attention_mask;
+    torch::Tensor rejected_input_ids;   
+    torch::Tensor rejected_attention_mask; 
 };
 
-// ─────────────────────────────────────────────────────────────
 // DPO batch — same layout + token labels on both sides
-// ─────────────────────────────────────────────────────────────
 struct DPOBatch {
     torch::Tensor chosen_input_ids;
     torch::Tensor chosen_attention_mask;
@@ -41,18 +38,11 @@ struct DPOBatch {
     torch::Tensor rejected_attention_mask;
     torch::Tensor rejected_labels;        // prompt portion = -100
 };
-
-// ─────────────────────────────────────────────────────────────
-// Rollout batch — prompt-only, left-padded, with gen space
-// ─────────────────────────────────────────────────────────────
 struct RolloutBatch {
     torch::Tensor prompt_ids;   // (B, max_prompt_len + max_gen_len)
-    torch::Tensor prompt_mask;  // (B, max_prompt_len + max_gen_len)
+    torch::Tensor prompt_mask;//same
 };
-
-// ─────────────────────────────────────────────────────────────
-// SFT collator (classic DynamicPaddingCollator, preserved)
-// ─────────────────────────────────────────────────────────────
+// (classic DynamicPaddingCollator, preserved)
 class DynamicPaddingCollator {
 public:
     explicit DynamicPaddingCollator(int64_t pad_token_id)
@@ -94,11 +84,7 @@ private:
     int64_t pad_id_;
 };
 
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
 namespace detail {
-
 // Concatenate prompt + side and pad a batch to max_len
 inline std::tuple<torch::Tensor, torch::Tensor>
 pad_sequences(const std::vector<torch::Tensor>& seqs,
@@ -127,16 +113,13 @@ inline torch::Tensor build_labels(const torch::Tensor& input_ids,
     return lbl;
 }
 
-} // namespace detail
-
-// ─────────────────────────────────────────────────────────────
+} 
 // Unified collator — dispatches on mode
-// ─────────────────────────────────────────────────────────────
 class UnifiedCollator {
 public:
     explicit UnifiedCollator(const DataLoaderConfig& cfg) : cfg_(cfg) {}
 
-    // ── SFT  ─────────────────────────────────────────────────
+    //SFT  
     SFTBatch collate_sft(
         const std::vector<UnifiedDataset::SFTItem>& items) const
     {
@@ -169,7 +152,7 @@ public:
         return {ids, mask, lbl};
     }
 
-    // ── Reward Model  ────────────────────────────────────────
+    // Reward Model  
     RewardModelBatch collate_reward_model(
         const std::vector<UnifiedDataset::PreferenceItem>& items) const
     {
@@ -188,7 +171,7 @@ public:
         return {cho_ids, cho_mask, rej_ids, rej_mask};
     }
 
-    // ── DPO  ─────────────────────────────────────────────────
+    // DPO  
     DPOBatch collate_dpo(
         const std::vector<UnifiedDataset::PreferenceItem>& items) const
     {
@@ -222,7 +205,7 @@ public:
         return {cho_ids, cho_mask, cho_lbl, rej_ids, rej_mask, rej_lbl};
     }
 
-    // ── Rollout  ─────────────────────────────────────────────
+    // Rollout 
     RolloutBatch collate_rollout(
         const std::vector<UnifiedDataset::RolloutItem>& items) const
     {
@@ -242,4 +225,4 @@ private:
     DataLoaderConfig cfg_;
 };
 
-} // namespace dl
+} 
