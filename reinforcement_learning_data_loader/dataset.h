@@ -68,7 +68,12 @@ struct DataLoaderConfig {
     std::string rejected_path = "rejected.bin";
 };
 
-
+// ─────────────────────────────────────────────────────────────
+// Lowest-level binary reader: reads one .bin file into a vector
+// of token-id vectors. Format: uint32 n_samples, then per sample
+// uint16 length + uint32 token_ids[length].
+// ─────────────────────────────────────────────────────────────
+class BinarySequenceReader {
 public:
     static std::vector<std::vector<int32_t>> load(const std::string& path) {
         std::ifstream f(path, std::ios::binary);

@@ -1,4 +1,44 @@
 #!/usr/bin/env python3
+"""
+tokenize_dataset.py — Unified tokenization script for the
+post-training data loader (SFT / REWARD_MODEL / DPO / ROLLOUT).
+
+Binary file format (identical for every file produced):
+
+    uint32  n_samples
+    [per sample]
+        uint16  length
+        uint32  token_ids[length]
+
+Modes and the files they produce:
+
+    sft           -> prompts.bin, responses.bin
+    reward_model  -> prompts.bin, chosen.bin, rejected.bin
+    dpo           -> prompts.bin, chosen.bin, rejected.bin   (same as reward_model)
+    rollout       -> prompts.bin
+
+Input data format (JSONL), one JSON object per line:
+
+    sft:
+        {"prompt": "...", "response": "..."}
+
+    reward_model / dpo:
+        {"prompt": "...", "chosen": "...", "rejected": "..."}
+
+    rollout:
+        {"prompt": "..."}
+
+Tokenizer:
+    Defaults to the real HuggingFace tokenizer for
+    "inceptionai/jais-family-590m" (loaded via AutoTokenizer with
+    trust_remote_code=True, since Jais ships a custom tokenizer class).
+
+    Override with --tokenizer <name_or_path> to use any other
+    HuggingFace tokenizer.
+
+Install requirements:
+    pip install transformers
+"""
 
 import argparse
 import json
@@ -98,7 +138,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", required=True, help="Path to input JSONL file")
     parser.add_argument("--output-dir", required=True,    help="Directory to write .bin files into")
-      parser.add_argument("--mode", required=True,        choices=["sft", "reward_model", "dpo", "rollout"],   help="Which binary files to produce")
+    parser.add_argument("--mode", required=True,        choices=["sft", "reward_model", "dpo", "rollout"],   help="Which binary files to produce")
     parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,  help=f"HuggingFace tokenizer name/path "     f"(default: {DEFAULT_TOKENIZER})")
     parser.add_argument("--max-seq-len", type=int, default=2048,   help="Max length for sft/reward_model/dpo sequences "    "(applied independently per field)")
     parser.add_argument("--max-prompt-len", type=int, default=512, help="Max prompt length for rollout mode")
@@ -128,66 +168,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-"""
-tokenize_dataset.py — Unified tokenization script for the
-post-training data loader (SFT / REWARD_MODEL / DPO / ROLLOUT).
-
-Binary file format (identical for every file produced):
-
-    uint32  n_samples
-    [per sample]
-        uint16  length
-        uint32  token_ids[length]
-
-Modes and the files they produce:
-
-    sft           -> prompts.bin, responses.bin
-    reward_model  -> prompts.bin, chosen.bin, rejected.bin
-    dpo           -> prompts.bin, chosen.bin, rejected.bin   (same as reward_model)
-    rollout       -> prompts.bin
-
-Input data format (JSONL), one JSON object per line:
-
-    sft:
-        {"prompt": "...", "response": "..."}
-
-    reward_model / dpo:
-        {"prompt": "...", "chosen": "...", "rejected": "..."}
-
-    rollout:
-        {"prompt": "..."}
-
-Tokenizer:
-    Defaults to the real HuggingFace tokenizer for
-    "inceptionai/jais-family-590m" (loaded via AutoTokenizer with
-    trust_remote_code=True, since Jais ships a custom tokenizer class).
-
-    Override with --tokenizer <name_or_path> to use any other
-    HuggingFace tokenizer.
-
-Install requirements:
-    pip install transformers
-"""
