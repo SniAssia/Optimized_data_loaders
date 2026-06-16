@@ -160,13 +160,13 @@ namespace dl
         void clear()
         {
             entries_.clear();
-            prompt_ids_ = {};
-            response_ids_ = {};
-            old_log_probs_ = {};
-            ref_log_probs_ = {};
-            rewards_ = {};
-            advantages_ = {};
-            perm_ = {};
+            prompt_ids_ = torch::Tensor();
+            response_ids_ = torch::Tensor();
+            old_log_probs_ = torch::Tensor();
+            ref_log_probs_ = torch::Tensor();
+            rewards_ = torch::Tensor();
+            advantages_ = torch::Tensor();
+            perm_ = torch::Tensor();
             cursor_ = 0;
             total_samples_ = 0;
             sealed_ = false;
