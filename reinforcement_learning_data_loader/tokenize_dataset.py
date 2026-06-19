@@ -1,70 +1,19 @@
 #!/usr/bin/env python3
-"""
-tokenize_dataset.py — Streaming tokenization + sharding for the
-post-training data loader (SFT / REWARD_MODEL / DPO / ROLLOUT).
-
-CHANGES FROM ORIGINAL:
-    - No longer loads the full JSONL into RAM before tokenizing.
-      Records are consumed one at a time from a streaming generator.
-    - Output is split into numbered shards (shard_00/, shard_01/, ...)
-      each containing at most --shard-size records. This keeps peak
-      RAM proportional to one shard, not the full dataset.
-    - Input can be either:
-        a) A HuggingFace dataset name  (e.g. "Anthropic/hh-rlhf")
-           streamed via prepare_dataset.stream_dataset()
-        b) A local JSONL file path     (e.g. "data/my_data.jsonl")
-           streamed via prepare_dataset.stream_jsonl()
-      The --input flag accepts both. If the value looks like a file
-      path (ends with .jsonl or the path exists on disk) it is treated
-      as a local JSONL file; otherwise it is treated as a HuggingFace
-      dataset name.
-    - The old --input / --output-dir / --mode / --tokenizer /
-      --max-seq-len / --max-prompt-len flags are all preserved so
-      existing notebook cells that call this script continue to work.
-
-Binary shard format (identical to the original single-file format):
-
-    uint32  n_samples          <- number of sequences in THIS shard
-    [per sample]
-        uint16  length
-        uint32  token_ids[length]
-
-Output directory layout:
-
-    <output-dir>/
-        shard_00/
-            prompts.bin
-            chosen.bin          (reward_model / dpo modes)
-            rejected.bin        (reward_model / dpo modes)
-            responses.bin       (sft mode)
-        shard_01/
-            ...
-        manifest.json           <- lists all shards + sample counts
-
-The manifest lets the C++ multi-dataset loader discover shards without
-scanning the directory tree.
-
-Backward compatibility:
-    If --shard-size is set to 0 (or omitted and the dataset fits in
-    one shard) the output layout is identical to the original:
-
-        <output-dir>/
-            prompts.bin
-            chosen.bin
-            rejected.bin
-
-    so existing C++ code that reads a single flat directory still works.
-"""
-
 import argparse
 import json
 import os
+import queue
+import random
 import struct
-import sys
+import threading
 
-MAX_SEQ_LEN_HARD_CAP = 65535   # uint16 length field
-DEFAULT_TOKENIZER    = "inceptionai/jais-family-590m"
-DEFAULT_SHARD_SIZE   = 10_000  # records per shard (0 = no sharding)
+MAX_SEQ_LEN_HARD_CAP    = 65535
+DEFAULT_TOKENIZER       = "inceptionai/jais-family-590m"
+DEFAULT_SHARD_SIZE      = 10_000
+DEFAULT_SHUFFLE_BUF     = 50_000
+
+# Sentinel — pushed by SourceThread when its source is exhausted
+_DONE = object()
 
 
 def load_tokenizer(name_or_path):
@@ -74,7 +23,7 @@ def load_tokenizer(name_or_path):
     except Exception as e:
         raise RuntimeError(
             f"Failed to load tokenizer '{name_or_path}': {e}\n"
-            "Make sure `transformers` is installed and you have network access."
+            "Make sure transformers is installed and you have network access."
         ) from e
     return HFTokenizerWrapper(tok)
 
@@ -91,33 +40,21 @@ class HFTokenizerWrapper:
         return ids
 
 
-# Binary shard writer
-# Accumulates encoded sequences for one shard then flushes to disk.
-# Peak RAM = one shard of token ID lists (typically ~20 MB).
-
 class ShardWriter:
     """
-    Collects encoded sequences for a single shard and writes them
-    to disk when flush() is called.
-
-    Usage:
-        writer = ShardWriter(shard_dir, max_len)
-        writer.add("prompts",   prompt_ids)
-        writer.add("chosen",    chosen_ids)
-        writer.add("rejected",  rejected_ids)
-        ...
-        writer.flush()   # writes shard_dir/prompts.bin etc. and resets
+    Accumulates token ID lists for one shard in RAM.
+    flush() writes all fields to disk and resets.
+    Peak RAM = one shard worth of token IDs (~20 MB at shard_size=10000).
     """
 
     def __init__(self, out_dir, max_len):
-        self.out_dir  = out_dir
-        self.max_len  = max_len
-        self._buffers = {}          # field_name -> list[list[int]]
-        self._count   = 0
-        self._n_truncated = 0
+        self.out_dir       = out_dir
+        self.max_len       = max_len
+        self._buffers      = {}
+        self._count        = 0
+        self._n_truncated  = 0
 
     def add(self, field, token_ids):
-        #Add one encoded sequence to the named field buffer
         if self.max_len and len(token_ids) > self.max_len:
             token_ids = token_ids[:self.max_len]
             self._n_truncated += 1
@@ -127,56 +64,215 @@ class ShardWriter:
         self._buffers.setdefault(field, []).append(token_ids)
 
     def commit_record(self):
-        #Call once per input record after all add() calls for that record.
         self._count += 1
 
     def n_records(self):
         return self._count
 
-    def flush(self):
-        #Write all buffered sequences to disk and reset the buffer.
-        if self._count == 0:
-            return {}
+    def snapshot_and_reset(self):
+        """
+        Returns (buffers, count, n_truncated) and resets internal state.
+        Called by the main thread to hand data off to ShardFlusher
+        without copying — the flusher owns the snapshot.
+        """
+        snap = (self._buffers, self._count, self._n_truncated)
+        self._buffers     = {}
+        self._count       = 0
+        self._n_truncated = 0
+        return snap
 
-        os.makedirs(self.out_dir, exist_ok=True)
-        written_files = {}
+    def flush_to_disk(self, out_dir, buffers, count, n_truncated):
+        """
+        Writes a snapshot (produced by snapshot_and_reset) to disk.
+        Called from the ShardFlusher background thread.
+        """
+        if count == 0:
+            return 0
 
-        for field, seqs in self._buffers.items():
-            path = os.path.join(self.out_dir, f"{field}.bin")
+        os.makedirs(out_dir, exist_ok=True)
+
+        for field, seqs in buffers.items():
+            path = os.path.join(out_dir, f"{field}.bin")
             with open(path, "wb") as f:
                 f.write(struct.pack("<I", len(seqs)))
                 for seq in seqs:
                     f.write(struct.pack("<H", len(seq)))
                     if seq:
                         f.write(struct.pack(f"<{len(seq)}I", *seq))
-            written_files[field] = path
             print(f"  [shard] wrote {len(seqs)} sequences → {path}"
-                  + (f" ({self._n_truncated} truncated)" if self._n_truncated else ""))
+                  + (f" ({n_truncated} truncated)" if n_truncated else ""))
+        return count
+# Stage 1 — SourceThread
+# One thread per input source. Streams records and pushes them into a
+# shared queue. Pushes _DONE when the source is exhausted.
 
-        n = self._count
-        # reset
-        self._buffers      = {}
-        self._count        = 0
-        self._n_truncated  = 0
-        return written_files, n
+class SourceThread:
+    """
+    Wraps one record generator in a background thread.
+    Records are pushed into shared_queue as plain dicts.
+    When the generator is exhausted, pushes _DONE once.
+    """
 
+    def __init__(self, generator, shared_queue, source_name=""):
+        self.generator    = generator
+        self.queue        = shared_queue
+        self.source_name  = source_name
+        self._thread      = threading.Thread(
+            target=self._run, daemon=True,
+            name=f"source-{source_name}"
+        )
 
-# Streaming tokenization modes
-# Each run_* function accepts a record GENERATOR (not a list) so it
-# never materialises more than one shard's records in RAM.
+    def start(self):
+        self._thread.start()
+
+    def join(self):
+        self._thread.join()
+
+    def _run(self):
+        n = 0
+        try:
+            for rec in self.generator:
+                self.queue.put(rec)
+                n += 1
+        except Exception as e:
+            print(f"[SourceThread:{self.source_name}] ERROR: {e}")
+        finally:
+            self.queue.put(_DONE)
+            print(f"[SourceThread:{self.source_name}] done — pushed {n} records")
+# Stage 2 — ShuffleBuffer
+# Reads from the shared queue filled by all SourceThreads.
+# Maintains a pool of N text records from all sources mixed together.
+# Randomly evicts one record at a time downstream.
+# Larger buffer = better shuffle quality, more RAM used for text (~25MB
+# at 50000 records since text records are only ~500 bytes each).
+class ShuffleBuffer:
+    """
+    Approximate global shuffle across all source streams.
+
+    Internally keeps a list (the pool) of up to `size` records.
+    - While pool is not full: accumulate records from the queue.
+    - Once full: for each new record arriving, randomly pick and
+      yield one record from the pool, replace it with the new record.
+    - When all sources are done: yield remaining pool in random order.
+
+    This is identical to WebDataset's shuffle buffer logic.
+    """
+
+    def __init__(self, shared_queue, n_sources, size=DEFAULT_SHUFFLE_BUF):
+        self.queue     = shared_queue
+        self.n_sources = n_sources
+        self.size      = size
+
+    def __iter__(self):
+        pool         = []
+        done_count   = 0   # how many SourceThreads have sent _DONE
+
+        while done_count < self.n_sources or pool:
+
+            # Drain queue into pool until full or all sources done
+            while len(pool) < self.size and done_count < self.n_sources:
+                item = self.queue.get()
+                if item is _DONE:
+                    done_count += 1
+                    print(f"[ShuffleBuffer] source finished "
+                          f"({done_count}/{self.n_sources} done), "
+                          f"pool size={len(pool)}")
+                else:
+                    pool.append(item)
+
+            if not pool:
+                break
+
+            # Yield one random record from the pool
+            idx        = random.randrange(len(pool))
+            # Swap with last element for O(1) removal
+            pool[idx], pool[-1] = pool[-1], pool[idx]
+            yield pool.pop()
+
+        # All sources exhausted — drain remaining pool in random order
+        random.shuffle(pool)
+        yield from pool
+        print(f"[ShuffleBuffer] fully drained")
+
+# Stage 3 — ShardFlusher
+# Receives full shard snapshots from the main thread via an internal queue.
+# Writes .bin files to disk in a background thread.
+# Main thread never waits for disk I/O.
+class ShardFlusher:
+    """
+    Background thread that writes shard snapshots to disk.
+
+    Main thread calls submit(shard_dir, snapshot) — returns immediately.
+    Background thread picks up the snapshot and writes .bin files.
+    Call join() at the end to wait for all pending writes to complete.
+    """
+
+    def __init__(self, writer):
+        self._writer  = writer       # ShardWriter instance (used only for flush_to_disk)
+        self._queue   = queue.Queue()
+        self._thread  = threading.Thread(
+            target=self._run, daemon=True, name="shard-flusher"
+        )
+        self._thread.start()
+        self._manifest_entries = []  # collected here, thread-safe via GIL on list.append
+        self._lock = threading.Lock()
+
+    def submit(self, shard_dir, snapshot, shard_idx):
+        """
+        Hand off a full shard snapshot to the background thread.
+        snapshot = (buffers, count, n_truncated) from ShardWriter.snapshot_and_reset()
+        Returns immediately — does not wait for disk write.
+        """
+        self._queue.put((shard_dir, snapshot, shard_idx))
+
+    def join(self):
+        #Wait for all pending shard writes to complete
+        self._queue.put(None)   # sentinel — tells background thread to exit
+        self._thread.join()
+
+    def manifest_entries(self):
+        return self._manifest_entries
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break   # sentinel received — exit
+            shard_dir, (buffers, count, n_truncated), shard_idx = item
+            n = self._writer.flush_to_disk(shard_dir, buffers, count, n_truncated)
+            with self._lock:
+                self._manifest_entries.append({
+                    "shard":     shard_idx,
+                    "n_samples": n,
+                    "dir":       shard_dir,
+                })
+            print(f"[ShardFlusher] shard_{shard_idx:02d} written ({n} records)")
+
 
 def _make_shard_dir(base_out_dir, shard_idx, use_sharding):
-    """Return the directory to write a shard into."""
     if use_sharding:
         return os.path.join(base_out_dir, f"shard_{shard_idx:02d}")
-    return base_out_dir   # flat layout — backward compatible
+    return base_out_dir
 
 
+def _write_manifest(out_dir, mode, manifest, use_sharding):
+    if not use_sharding:
+        return
+    # Sort by shard index so the manifest is ordered
+    manifest = sorted(manifest, key=lambda e: e["shard"])
+    path = os.path.join(out_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"mode": mode, "shards": manifest}, f, indent=2)
+    print(f"[tokenize_dataset] manifest written → {path}")
+# Streaming tokenization modes
+# These now receive a ShuffleBuffer iterator instead of a plain generator.
+# Internally they use ShardFlusher for async disk writes.
+# Logic is otherwise identical to the previous version.
 def run_sft(record_gen, tok, out_dir, max_len, shard_size):
     use_sharding = shard_size > 0
-    manifest     = []
     shard_idx    = 0
     writer       = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding), max_len)
+    flusher      = ShardFlusher(writer)
 
     for rec in record_gen:
         writer.add("prompts",   tok.encode(rec["prompt"],   add_eos=False))
@@ -184,154 +280,246 @@ def run_sft(record_gen, tok, out_dir, max_len, shard_size):
         writer.commit_record()
 
         if use_sharding and writer.n_records() >= shard_size:
-            _, n = writer.flush()
-            manifest.append({"shard": shard_idx, "n_samples": n,
-                              "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
-            shard_idx += 1
-            writer = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding), max_len)
+            snap   = writer.snapshot_and_reset()
+            shard_dir= _make_shard_dir(out_dir, shard_idx, use_sharding)
+            flusher.submit(shard_dir, snap, shard_idx)
+            shard_idx+= 1
+            writer.out_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
 
-    # flush final (possibly partial) shard
+    # flush final partial shard
     if writer.n_records() > 0:
-        _, n = writer.flush()
-        manifest.append({"shard": shard_idx, "n_samples": n,
-                          "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
+        snap      = writer.snapshot_and_reset()
+        shard_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
+        flusher.submit(shard_dir, snap, shard_idx)
 
-    _write_manifest(out_dir, "sft", manifest, use_sharding)
-    print(f"[tokenize_dataset] sft mode: {sum(e['n_samples'] for e in manifest)} "
-          f"records written across {len(manifest)} shard(s) in {out_dir}")
+    flusher.join()
+    _write_manifest(out_dir, "sft", flusher.manifest_entries(), use_sharding)
+    total = sum(e["n_samples"] for e in flusher.manifest_entries())
+    print(f"[tokenize_dataset] sft: {total} records in "
+          f"{len(flusher.manifest_entries())} shard(s) → {out_dir}")
 
 
 def run_preference(record_gen, tok, out_dir, max_len, shard_size, label):
     use_sharding = shard_size > 0
-    manifest     = []
     shard_idx    = 0
     writer       = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding), max_len)
+    flusher      = ShardFlusher(writer)
 
     for rec in record_gen:
-        writer.add("prompts",  tok.encode(rec["prompt"],   add_eos=False))
-        writer.add("chosen",   tok.encode(rec["chosen"],   add_eos=True))
+        writer.add("prompts",tok.encode(rec["prompt"],   add_eos=False))
+        writer.add("chosen",         tok.encode(rec["chosen"],   add_eos=True))
         writer.add("rejected", tok.encode(rec["rejected"], add_eos=True))
         writer.commit_record()
 
         if use_sharding and writer.n_records() >= shard_size:
-            _, n = writer.flush()
-            manifest.append({"shard": shard_idx, "n_samples": n,
-                              "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
+            snap      = writer.snapshot_and_reset()
+            shard_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
+            flusher.submit(shard_dir, snap, shard_idx)
             shard_idx += 1
-            writer = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding), max_len)
+            writer.out_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
 
     if writer.n_records() > 0:
-        _, n = writer.flush()
-        manifest.append({"shard": shard_idx, "n_samples": n,
-                          "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
+        snap      = writer.snapshot_and_reset()
+        shard_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
+        flusher.submit(shard_dir, snap, shard_idx)
 
-    _write_manifest(out_dir, label, manifest, use_sharding)
-    total = sum(e["n_samples"] for e in manifest)
-    print(f"[tokenize_dataset] {label} mode: {total} records written across "
-          f"{len(manifest)} shard(s) → prompts / chosen / rejected in {out_dir}")
+    flusher.join()
+    _write_manifest(out_dir, label, flusher.manifest_entries(), use_sharding)
+    total = sum(e["n_samples"] for e in flusher.manifest_entries())
+    print(f"[tokenize_dataset] {label}: {total} records in "
+          f"{len(flusher.manifest_entries())} shard(s) → {out_dir}")
 
 
 def run_rollout(record_gen, tok, out_dir, max_prompt_len, shard_size):
     use_sharding = shard_size > 0
-    manifest     = []
     shard_idx    = 0
     writer       = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding),
                                max_prompt_len)
+    flusher      = ShardFlusher(writer)
 
     for rec in record_gen:
         writer.add("prompts", tok.encode(rec["prompt"], add_eos=False))
         writer.commit_record()
 
         if use_sharding and writer.n_records() >= shard_size:
-            _, n = writer.flush()
-            manifest.append({"shard": shard_idx, "n_samples": n,
-                              "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
+            snap      = writer.snapshot_and_reset()
+            shard_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
+            flusher.submit(shard_dir, snap, shard_idx)
             shard_idx += 1
-            writer = ShardWriter(_make_shard_dir(out_dir, shard_idx, use_sharding),
-                                 max_prompt_len)
+            writer.out_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
 
     if writer.n_records() > 0:
-        _, n = writer.flush()
-        manifest.append({"shard": shard_idx, "n_samples": n,
-                          "dir": _make_shard_dir(out_dir, shard_idx, use_sharding)})
+        snap      = writer.snapshot_and_reset()
+        shard_dir = _make_shard_dir(out_dir, shard_idx, use_sharding)
+        flusher.submit(shard_dir, snap, shard_idx)
 
-    _write_manifest(out_dir, "rollout", manifest, use_sharding)
-    total = sum(e["n_samples"] for e in manifest)
-    print(f"[tokenize_dataset] rollout mode: {total} prompts written across "
-          f"{len(manifest)} shard(s) in {out_dir}")
+    flusher.join()
+    _write_manifest(out_dir, "rollout", flusher.manifest_entries(), use_sharding)
+    total = sum(e["n_samples"] for e in flusher.manifest_entries())
+    print(f"[tokenize_dataset] rollout: {total} prompts in "
+          f"{len(flusher.manifest_entries())} shard(s) → {out_dir}")
 
 
-# Manifest
-def _write_manifest(out_dir, mode, manifest, use_sharding):
-    """Write manifest.json so the C++ loader can discover shards."""
-    if not use_sharding:
-        return   # flat layout — no manifest needed, C++ reads directly
-    path = os.path.join(out_dir, "manifest.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"mode": mode, "shards": manifest}, f, indent=2)
-    print(f"[tokenize_dataset] manifest written → {path}")
-
-# Input source resolution
-# Decides whether --input is a HuggingFace dataset name or a local file.
 def _resolve_input(input_arg, split):
-    """
-    Returns a generator of normalized {prompt, chosen, rejected} records.
-
-    Rules:
-        - If input_arg ends with .jsonl OR the path exists on disk
-          → treat as local JSONL file via stream_jsonl()
-        - Otherwise
-          → treat as HuggingFace dataset name via stream_dataset()
-    """
     import prepare_dataset as pd
-
     is_local = input_arg.endswith(".jsonl") or os.path.isfile(input_arg)
-
     if is_local:
         print(f"[tokenize_dataset] input: local JSONL → {input_arg}")
         return pd.stream_jsonl(input_arg)
     else:
-        print(f"[tokenize_dataset] input: HuggingFace dataset → {input_arg} "
-              f"(split={split})")
+        print(f"[tokenize_dataset] input: HuggingFace → {input_arg} (split={split})")
         return pd.stream_dataset(input_arg, split=split)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter  )
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
-        "--input", required=True,
-    help="HuggingFace dataset name (e.g. 'Anthropic/hh-rlhf') "
-             "OR path to a local .jsonl file" )
+        "--input", required=True, nargs="+",
+        help="One or more HuggingFace dataset names or local .jsonl paths. "
+             "Example: --input Anthropic/hh-rlhf --input my_data.jsonl" )
     parser.add_argument(
-               "--split", default="train", help="HuggingFace split to use (ignored for local files, default: train)" )
-    parser.add_argument(  "--output-dir", required=True,
-     help="Root directory to write shard subdirectories into")
+        "--split", default="train", help="HuggingFace split (ignored for local files, default: train)" )
+    parser.add_argument(
+        "--output-dir", required=True,
+        help="Root directory to write shard subdirectories into")
     parser.add_argument(
         "--mode", required=True,
-  choices=["sft", "reward_model", "dpo", "rollout"], help="Which binary files to produce"  )
-    parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,help=f"HuggingFace tokenizer name/path (default: {DEFAULT_TOKENIZER})" )
-    parser.add_argument(  "--max-seq-len", type=int, default=2048, help="Max token length for sft/reward_model/dpo sequences")
-    parser.add_argument( "--max-prompt-len", type=int, default=512, help="Max prompt token length for rollout mode" )
+        choices=["sft", "reward_model", "dpo", "rollout"],
+        help="Which binary files to produce" )
     parser.add_argument(
-     "--shard-size", type=int, default=DEFAULT_SHARD_SIZE,
-    help="Records per shard directory (0 = no sharding, flat layout "
-             "identical to the original script)" )
+        "--tokenizer", default=DEFAULT_TOKENIZER,
+        help=f"HuggingFace tokenizer name/path (default: {DEFAULT_TOKENIZER})"  )
+    parser.add_argument(
+        "--max-seq-len", type=int, default=2048,
+        help="Max token length for sft/reward_model/dpo sequences"  )
+    parser.add_argument(
+        "--max-prompt-len", type=int, default=512,
+        help="Max prompt token length for rollout mode" )
+    parser.add_argument(
+        "--shard-size", type=int, default=DEFAULT_SHARD_SIZE,
+        help="Records per shard (0 = flat layout, backward compatible)" )
+    # NEW flag
+    parser.add_argument(
+        "--shuffle-buffer-size", type=int, default=DEFAULT_SHUFFLE_BUF,
+        help="Shuffle buffer size in records across all sources "
+             "(larger = better shuffle quality, more RAM for text, "
+             "default: 50000 ≈ 25 MB)"
+    )
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    # ---- load tokenizer once ----
     print(f"[tokenize_dataset] loading tokenizer '{args.tokenizer}' ...")
     tok = load_tokenizer(args.tokenizer)
     print(f"[tokenize_dataset] tokenizer loaded (eos_token_id={tok.eos_token_id})")
-    record_gen = _resolve_input(args.input, args.split)
+    # ---- Stage 1: build one SourceThread per input ----
+    shared_queue = queue.Queue(maxsize=args.shuffle_buffer_size * 2)
+    threads = []
+    for inp in args.input:
+        gen    = _resolve_input(inp, args.split)
+        thread = SourceThread(gen, shared_queue, source_name=inp)
+        threads.append(thread)
+
+    print(f"[tokenize_dataset] starting {len(threads)} source thread(s) ...")
+    for t in threads:
+        t.start()
+
+    # ---- Stage 2: shuffle buffer merges all streams ----
+    shuffle_buf = ShuffleBuffer(
+        shared_queue,
+        n_sources=len(threads),
+        size=args.shuffle_buffer_size,
+    )
+
+    #  tokenize + async shard flusher ----
+    # shuffle_buf is the record_gen passed to run_* functions
+    # ShardFlusher inside each run_* handles async disk writes
+
     if args.mode == "sft":
-        run_sft(record_gen, tok, args.output_dir, args.max_seq_len, args.shard_size)
+        run_sft(shuffle_buf, tok, args.output_dir,
+                args.max_seq_len, args.shard_size)
 
     elif args.mode in ("reward_model", "dpo"):
-        run_preference(record_gen, tok, args.output_dir,
+        run_preference(shuffle_buf, tok, args.output_dir,
                        args.max_seq_len, args.shard_size, args.mode)
+
     elif args.mode == "rollout":
-        run_rollout(record_gen, tok, args.output_dir,
+        run_rollout(shuffle_buf, tok, args.output_dir,
                     args.max_prompt_len, args.shard_size)
+    for t in threads:
+        t.join()
+
+    print(f"[tokenize_dataset] all done → {args.output_dir}")
+
+
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+""" 
+How to Use It
+Single source — identical to before:
+bashpython3 tokenize_dataset.py \
+    --input Anthropic/hh-rlhf \
+    --output-dir out/ \
+    --mode reward_model
+Multiple sources — new:
+bashpython3 tokenize_dataset.py \
+    --input Anthropic/hh-rlhf \
+    --input HuggingFaceH4/ultrafeedback_binarized \
+    --input my_local_data.jsonl \
+    --output-dir out/ \
+    --mode reward_model \
+    --shuffle-buffer-size 50000
+"""
+
+
+"""
+tokenize_dataset.py — Streaming multi-source tokenization + sharding
+for the post-training data loader (SFT / REWARD_MODEL / DPO / ROLLOUT).
+
+CHANGES FROM PREVIOUS VERSION:
+    - Accepts multiple --input sources simultaneously
+    - Stage 1: one SourceThread per input, all stream in parallel
+    - Stage 2: ShuffleBuffer merges all streams + approximate global shuffle
+    - Stage 3: ShardFlusher writes .bin files asynchronously in background
+    - Main pipeline never blocks on disk I/O
+    - New flag: --shuffle-buffer-size (default 50000)
+    - All previous flags preserved for backward compatibility
+
+Single-source usage (identical to before):
+    python3 tokenize_dataset.py \
+        --input Anthropic/hh-rlhf \
+        --output-dir out/ \
+        --mode reward_model
+
+Multi-source usage (new):
+    python3 tokenize_dataset.py \
+        --input Anthropic/hh-rlhf \
+        --input HuggingFaceH4/ultrafeedback_binarized \
+        --input my_local_data.jsonl \
+        --output-dir out/ \
+        --mode reward_model \
+        --shuffle-buffer-size 50000
+
+Binary shard format (unchanged):
+    uint32  n_samples
+    [per sample]
+        uint16  length
+        uint32  token_ids[length]
+
+Output layout (unchanged):
+    <output-dir>/
+        shard_00/prompts.bin  chosen.bin  rejected.bin
+        shard_01/...
+        manifest.json
+"""
