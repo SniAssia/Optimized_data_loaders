@@ -12,7 +12,6 @@
 //   ./dataloader_demo reward_model
 //   ./dataloader_demo dpo
 //   ./dataloader_demo rollout
-
 #include "dataset.h"
 #include "sampler.h"
 #include "collator.h"
@@ -20,10 +19,8 @@
 #include "dataloader.h"
 #include "rollout_buffer.h"
 #include "distributed.h"
-
 #include <iostream>
 #include <string>
-
 using namespace dl;
 
 static void run_sft(const DataLoaderConfig& base_cfg, DistributedContext& dctx)
