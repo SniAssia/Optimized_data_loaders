@@ -27,12 +27,10 @@ Adding a new dataset:
 import argparse
 
 
-# ---------------------------------------------------------------------------
 # Per-dataset adapters
 # Each adapter receives one raw HuggingFace example dict and returns either
 # a normalized dict  {"prompt": str, "chosen": str, "rejected": str}
 # or None to signal that this example should be skipped.
-# ---------------------------------------------------------------------------
 
 def adapt_hh_rlhf(example):
     def split_last_assistant(text):
@@ -84,11 +82,7 @@ ADAPTERS = {
     "stanfordnlp/SHP":                       adapt_shp,
 }
 
-
-# ---------------------------------------------------------------------------
 # Public streaming API
-# ---------------------------------------------------------------------------
-
 def stream_dataset(dataset_name, split="train"):
     """
     Generator — yields one normalized record dict at a time.
@@ -150,9 +144,6 @@ def stream_jsonl(path):
             rec = json.loads(line)
             if rec.get("prompt") and rec.get("chosen") and rec.get("rejected"):
                 yield rec
-
-
-# ---------------------------------------------------------------------------
 # __main__ — backward-compatible CLI
 #
 # OLD behaviour:  python prepare_dataset.py --dataset X --output out.jsonl
@@ -165,19 +156,16 @@ def stream_jsonl(path):
 #
 # If you genuinely need to write a JSONL file (e.g. for inspection),
 # pass --write-jsonl and --output will be honoured.
-# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
         description="Stream-prepare a dataset for the RL data loader pipeline."
     )
-    ap.add_argument("--dataset",    required=True, choices=list(ADAPTERS.keys()))
-    ap.add_argument("--split",      default="train")
-    ap.add_argument("--output",     default=None,
+    ap.add_argument("--dataset", required=True, choices=list(ADAPTERS.keys()))
+    ap.add_argument("--split",  default="train")
+    ap.add_argument("--output",  default=None,
                     help="Output path (only used with --write-jsonl)")
-    ap.add_argument("--write-jsonl", action="store_true",
-                    help="Write normalized records to --output as JSONL "
-                         "(use only for inspection — not needed for training)")
+    ap.add_argument("--write-jsonl", action="store_true",         help="Write normalized records to --output as JSONL "          "(use only for inspection — not needed for training)")
     args = ap.parse_args()
 
     import json, sys
@@ -190,19 +178,15 @@ def main():
         out = open(args.output, "w", encoding="utf-8")
     else:
         out = None
-
     for rec in stream_dataset(args.dataset, args.split):
         n_written += 1
         if out:
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
     if out:
         out.close()
-        print(f"wrote {n_written} records to {args.output}, "
-              f"skipped {n_skipped_empty}")
+        print(f"wrote {n_written} records to {args.output}, " f"skipped {n_skipped_empty}")
     else:
-        print(f"streamed {n_written} records "
-              f"(use --write-jsonl --output <path> to save as JSONL)")
+        print(f"streamed {n_written} records "   f"(use --write-jsonl --output <path> to save as JSONL)")
 
 
 if __name__ == "__main__":
