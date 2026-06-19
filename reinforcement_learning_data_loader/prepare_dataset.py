@@ -1,37 +1,9 @@
 #!/usr/bin/env python3
-"""
-prepare_dataset.py — Streaming dataset adapters for the post-training
-data loader pipeline.
-
-CHANGES FROM ORIGINAL:
-    - No longer writes an intermediate JSONL file to disk.
-    - Each adapter is now a generator that yields one normalized record
-      at a time so the caller (tokenize_dataset.py) can tokenize and
-      shard on the fly without ever holding the full dataset in RAM.
-    - When run as __main__ it still accepts the same CLI flags as before
-      for backward compatibility, but now pipes records directly into
-      the tokenizer instead of writing a JSONL file.
-
-Supported datasets:
-    Anthropic/hh-rlhf
-    HuggingFaceH4/ultrafeedback_binarized
-    stanfordnlp/SHP
-
-Adding a new dataset:
-    1. Write an adapt_<name>(example) -> dict | None function.
-       Return None to skip a record (replaces the try/except pattern).
-    2. Register it in ADAPTERS below.
-    That is all — no other file needs to change.
-"""
-
 import argparse
-
-
 # Per-dataset adapters
 # Each adapter receives one raw HuggingFace example dict and returns either
 # a normalized dict  {"prompt": str, "chosen": str, "rejected": str}
 # or None to signal that this example should be skipped.
-
 def adapt_hh_rlhf(example):
     def split_last_assistant(text):
         idx = text.rfind("\n\nAssistant:")
@@ -41,8 +13,8 @@ def adapt_hh_rlhf(example):
         response = text[idx + len("\n\nAssistant:"):].strip()
         return prompt, response
 
-    prompt, chosen_resp   = split_last_assistant(example["chosen"])
-    _,      rejected_resp = split_last_assistant(example["rejected"])
+    prompt, chosen_resp=split_last_assistant(example["chosen"])
+    _, rejected_resp=split_last_assistant(example["rejected"])
 
     if not prompt or not chosen_resp or not rejected_resp:
         return None
@@ -51,8 +23,8 @@ def adapt_hh_rlhf(example):
 
 
 def adapt_ultrafeedback(example):
-    chosen  = example["chosen"]
-    rejected = example["rejected"]
+    chosen= example["chosen"]
+    rejected= example["rejected"]
 
     chosen_text   = chosen[-1]["content"]   if isinstance(chosen,   list) else chosen
     rejected_text = rejected[-1]["content"] if isinstance(rejected, list) else rejected
@@ -191,3 +163,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+"""
+prepare_dataset.py — Streaming dataset adapters for the post-training
+data loader pipeline.
+CHANGES FROM ORIGINAL:
+    - No longer writes an intermediate JSONL file to disk.
+    - Each adapter is now a generator that yields one normalized record
+      at a time so the caller (tokenize_dataset.py) can tokenize and
+      shard on the fly without ever holding the full dataset in RAM.
+    - When run as __main__ it still accepts the same CLI flags as before
+      for backward compatibility, but now pipes records directly into
+      the tokenizer instead of writing a JSONL file.
+Supported datasets:
+    Anthropic/hh-rlhf
+    HuggingFaceH4/ultrafeedback_binarized
+    stanfordnlp/SHP
+Adding a new dataset:
+    1. Write an adapt_<name>(example) -> dict | None function.
+       Return None to skip a record (replaces the try/except pattern).
+    2. Register it in ADAPTERS below.
+    That is all — no other file needs to change.
+"""
