@@ -19,14 +19,12 @@
 #include <string>
 #include <vector>
 
-
+#include "shard_manager.h"
 #include <torch/torch.h>
 
 namespace dl {
 
-// ─────────────────────────────────────────────────────────────
 // Training mode
-// ─────────────────────────────────────────────────────────────
 enum class TrainingMode {
     SFT,           // supervised fine-tuning
     REWARD_MODEL,  // preference model training (no token labels)
@@ -34,9 +32,7 @@ enum class TrainingMode {
     ROLLOUT        // RL prompt delivery (PPO / GRPO rollout phase)
 };
 
-// ─────────────────────────────────────────────────────────────
 // Unified raw sample
-// ─────────────────────────────────────────────────────────────
 struct RawSample {
     std::vector<int32_t> prompt_ids;    // always present
     std::vector<int32_t> response_ids;  // SFT only
@@ -66,13 +62,12 @@ struct DataLoaderConfig {
     std::string response_path = "responses.bin";
     std::string chosen_path   = "chosen.bin";
     std::string rejected_path = "rejected.bin";
+    std::string manifest_path  = ""; 
 };
 
-// ─────────────────────────────────────────────────────────────
 // Lowest-level binary reader: reads one .bin file into a vector
 // of token-id vectors. Format: uint32 n_samples, then per sample
 // uint16 length + uint32 token_ids[length].
-// ─────────────────────────────────────────────────────────────
 class BinarySequenceReader {
 public:
     static std::vector<std::vector<int32_t>> load(const std::string& path) {
@@ -107,6 +102,11 @@ private:
 class UnifiedDatasetReader {
 public:
     static std::vector<RawSample> load(const DataLoaderConfig& cfg) {
+        if (!cfg.manifest_path.empty()) {
+            // sharded layout — delegate to ShardManager
+            return ShardManager::load(cfg.manifest_path, cfg);
+        }
+        // flat layout (legacy / --shard-size 0)
         switch (cfg.mode) {
             case TrainingMode::SFT:
                 return load_sft(cfg);
@@ -117,7 +117,7 @@ public:
                 return load_rollout(cfg);
         }
         throw std::runtime_error("Unknown training mode");
-    }
+        }
 
 private:
     static std::vector<RawSample> load_sft(const DataLoaderConfig& cfg) {
@@ -352,4 +352,4 @@ private:
     UnifiedDataset inner_;
 };
 
-} // namespace dl
+} 
