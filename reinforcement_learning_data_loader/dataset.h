@@ -19,7 +19,6 @@
 #include <string>
 #include <vector>
 
-#include "shard_manager.h"
 #include <torch/torch.h>
 
 namespace dl {
@@ -353,3 +352,4 @@ private:
 };
 
 } 
+#include "shard_manager.h"
