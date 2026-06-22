@@ -377,9 +377,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--input", required=True, nargs="+",
-        help="One or more HuggingFace dataset names or local .jsonl paths. "
-             "Example: --input Anthropic/hh-rlhf --input my_data.jsonl" )
+    "--input", required=True, action="append",
+    help="..."
+    )
     parser.add_argument(
         "--split", default="train", help="HuggingFace split (ignored for local files, default: train)" )
     parser.add_argument(
