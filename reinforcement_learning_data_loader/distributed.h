@@ -37,8 +37,9 @@ static c10::intrusive_ptr<c10d::ProcessGroupNCCL> g_process_group;
 inline DistributedContext init_distributed(const std::string& backend = "nccl")
 {
     const char* rank_env = std::getenv("RANK");
+    (void)backend;
 
-    // ── Single-process fallback ───────────────────────────────
+    // Single-process fallback
     if (!rank_env)
     {
         DistributedContext ctx;
@@ -46,8 +47,8 @@ inline DistributedContext init_distributed(const std::string& backend = "nccl")
         ctx.world_size = 1;
         ctx.local_rank = 0;
         ctx.device     = torch::cuda::is_available()
-                         ? torch::Device(torch::kCUDA, 0)
-                         : torch::Device(torch::kCPU);
+       ? torch::Device(torch::kCUDA, 0)
+         : torch::Device(torch::kCPU);
         return ctx;
     }
 
