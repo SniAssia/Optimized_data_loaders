@@ -97,13 +97,18 @@ private:
         if (!f) throw std::runtime_error("Unexpected EOF in binary file");
     }
 };
+// forward declared here, defined in shard_manager.h (included below)
+std::vector<RawSample> load_sharded(const std::string& manifest_path,
+                                     const DataLoaderConfig& cfg);
+
 
 class UnifiedDatasetReader {
 public:
     static std::vector<RawSample> load(const DataLoaderConfig& cfg) {
         if (!cfg.manifest_path.empty()) {
             // sharded layout — delegate to ShardManager
-            return ShardManager::load(cfg.manifest_path, cfg);
+            return load_sharded(cfg.manifest_path, cfg);
+
         }
         // flat layout (legacy / --shard-size 0)
         switch (cfg.mode) {

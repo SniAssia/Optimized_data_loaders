@@ -190,5 +190,11 @@ private:
         return out;
     }
 };
+// Bridge function — called by dataset.h, defined here after ShardManager is complete
+inline std::vector<RawSample> load_sharded(const std::string& manifest_path,
+                                            const DataLoaderConfig& cfg)
+{
+    return ShardManager::load(manifest_path, cfg);
+}
 
 } 
