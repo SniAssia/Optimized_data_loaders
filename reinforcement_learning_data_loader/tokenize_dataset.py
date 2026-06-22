@@ -7,10 +7,10 @@ import random
 import struct
 import threading
 
-MAX_SEQ_LEN_HARD_CAP    = 65535
-DEFAULT_TOKENIZER       = "inceptionai/jais-family-590m"
-DEFAULT_SHARD_SIZE      = 10_000
-DEFAULT_SHUFFLE_BUF     = 50_000
+MAX_SEQ_LEN_HARD_CAP= 65535
+DEFAULT_TOKENIZER = "inceptionai/jais-family-590m"
+DEFAULT_SHARD_SIZE = 10_000
+DEFAULT_SHUFFLE_BUF = 50_000
 
 # Sentinel — pushed by SourceThread when its source is exhausted
 _DONE = object()
