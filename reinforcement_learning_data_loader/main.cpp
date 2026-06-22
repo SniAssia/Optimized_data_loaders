@@ -153,6 +153,7 @@ static void run_rollout(const DataLoaderConfig& base_cfg, DistributedContext& dc
 
 int main(int argc, char** argv)
 {
+    
     std::string mode = argc > 1 ? argv[1] : "sft";
 
     auto dctx = init_distributed();
@@ -166,15 +167,19 @@ int main(int argc, char** argv)
     cfg.max_prompt_len  = 128;
     cfg.max_gen_len     = 256;
     cfg.grpo_group_size = 8;
-    // ── Sharded layout (tokenize_dataset.py default) ──────────
-    cfg.manifest_path = "out/manifest.json";   // reads out/shard_00/, shard_01/, ...
 
-    // ── Flat layout (--shard-size 0) — uncomment to use ───────
-    // cfg.manifest_path = "";                 // leave empty for flat
-    // cfg.prompt_path   = "prompts.bin";
-    // cfg.response_path = "responses.bin";
-    // cfg.chosen_path   = "chosen.bin";
-    // cfg.rejected_path = "rejected.bin";
+    // argv[2] = manifest path (sharded layout)
+    // if not provided, falls back to flat file paths
+    if (argc > 2) {
+        cfg.manifest_path = argv[2];
+    } else {
+        cfg.manifest_path = "";
+        cfg.prompt_path   = "prompts.bin";
+        cfg.response_path = "responses.bin";
+        cfg.chosen_path   = "chosen.bin";
+        cfg.rejected_path = "rejected.bin";
+    }
+    
 
     try {
         if (mode == "sft")              run_sft(cfg, dctx);
