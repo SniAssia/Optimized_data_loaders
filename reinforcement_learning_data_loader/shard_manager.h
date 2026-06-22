@@ -2,7 +2,6 @@
 // shard_manager.h — Parallel multi-shard loader
 // Parses manifest.json produced by tokenize_dataset.py,
 // loads all shards concurrently, merges into flat vector<RawSample>.
-#include "dataset.h"
 #include <fstream>
 #include <future>
 #include <mutex>
