@@ -33,7 +33,38 @@ def adapt_ultrafeedback(example):
         return None
 
     return {"prompt": example["prompt"], "chosen": chosen_text, "rejected": rejected_text}
+def adapt_orca_dpo(example):
+    prompt = example.get("system", "") + "\n" + example.get("question", "")
+    chosen   = example.get("chosen", "")
+    rejected = example.get("rejected", "")
+    if not prompt.strip() or not chosen or not rejected:
+        return None
+    return {"prompt": prompt.strip(), "chosen": chosen, "rejected": rejected}
+def adapt_ultrainteract(example):
+    trajectory = example.get("trajectory", [])
+    chosen   = example.get("chosen", "")
+    rejected = example.get("rejected", "")
 
+    if not trajectory or not chosen or not rejected:
+        return None
+
+    # trajectory is a list of {from, value} turns
+    # concatenate all turns into a single prompt string
+    prompt_parts = []
+    for turn in trajectory:
+        role  = turn.get("from", "")
+        value = turn.get("value", "").strip()
+        if role == "user":
+            prompt_parts.append(f"User: {value}")
+        elif role == "assistant":
+            prompt_parts.append(f"Assistant: {value}")
+
+    prompt = "\n".join(prompt_parts).strip()
+
+    if not prompt or not chosen.strip() or not rejected.strip():
+        return None
+
+    return {"prompt": prompt, "chosen": chosen.strip(), "rejected": rejected.strip()}
 
 def adapt_shp(example):
     if example["labels"] == 1:
@@ -52,6 +83,8 @@ ADAPTERS = {
     "Anthropic/hh-rlhf":                    adapt_hh_rlhf,
     "HuggingFaceH4/ultrafeedback_binarized": adapt_ultrafeedback,
     "stanfordnlp/SHP":                       adapt_shp,
+     "openbmb/UltraInteract_pair":            adapt_ultrainteract, 
+     "Intel/orca_dpo_pairs" : adapt_orca_dpo
 }
 
 # Public streaming API
