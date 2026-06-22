@@ -166,12 +166,15 @@ int main(int argc, char** argv)
     cfg.max_prompt_len  = 128;
     cfg.max_gen_len     = 256;
     cfg.grpo_group_size = 8;
+    // ── Sharded layout (tokenize_dataset.py default) ──────────
+    cfg.manifest_path = "out/manifest.json";   // reads out/shard_00/, shard_01/, ...
 
-    // Default file names — adjust to wherever tokenize_dataset.py wrote them.
-    cfg.prompt_path   = "prompts.bin";
-    cfg.response_path = "responses.bin";
-    cfg.chosen_path   = "chosen.bin";
-    cfg.rejected_path = "rejected.bin";
+    // ── Flat layout (--shard-size 0) — uncomment to use ───────
+    // cfg.manifest_path = "";                 // leave empty for flat
+    // cfg.prompt_path   = "prompts.bin";
+    // cfg.response_path = "responses.bin";
+    // cfg.chosen_path   = "chosen.bin";
+    // cfg.rejected_path = "rejected.bin";
 
     try {
         if (mode == "sft")              run_sft(cfg, dctx);
