@@ -51,15 +51,14 @@ namespace dl
         torch::Tensor advantages;
     };
     // RolloutBuffer
-    class RolloutBuffer
-    {
+    class RolloutBuffer {
     public:
-        // minibatch_size  — number of samples per gradient-update step
+        //minibatch_size  — number of samples per gradient-update step
         // normalize_adv   — zero-mean / unit-std normalise advantages
-        //                   before iterating (standard PPO practice)
+        //before iterating (standard PPO practice)
         explicit RolloutBuffer(int32_t minibatch_size = 8,
                                bool normalize_adv = true)
-            : minibatch_size_(minibatch_size), normalize_adv_(normalize_adv), cursor_(0), sealed_(false)
+            : minibatch_size_(minibatch_size), normalize_adv_(normalize_adv),  sealed_(false),cursor_(0),total_samples_(0)
         {
         }
 
@@ -172,7 +171,7 @@ namespace dl
             sealed_ = false;
         }
 
-        // ── Accessors ────────────────────────────────────────────
+        // Accessors 
 
         bool is_sealed() const { return sealed_; }
         int64_t total_samples() const { return total_samples_; }
