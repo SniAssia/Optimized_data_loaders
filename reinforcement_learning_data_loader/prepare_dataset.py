@@ -86,7 +86,13 @@ ADAPTERS = {
      "openbmb/UltraInteract_pair":            adapt_ultrainteract, 
      "Intel/orca_dpo_pairs" : adapt_orca_dpo
 }
-
+SPLITS = {
+    "Anthropic/hh-rlhf":                    "train",
+    "HuggingFaceH4/ultrafeedback_binarized": "train_prefs",  
+    "stanfordnlp/SHP":                       "train",
+    "openbmb/UltraInteract_pair":            "train",
+    "Intel/orca_dpo_pairs":                  "train",
+}
 # Public streaming API
 def stream_dataset(dataset_name, split="train"):
     """
@@ -105,11 +111,14 @@ def stream_dataset(dataset_name, split="train"):
     Yields:
         dict with keys prompt / chosen / rejected
     """
+    
     if dataset_name not in ADAPTERS:
         raise ValueError(
             f"Unknown dataset '{dataset_name}'. "
             f"Available: {list(ADAPTERS.keys())}"
         )
+    if split == "train" and dataset_name in SPLITS:
+        split = SPLITS[dataset_name]
 
     from datasets import load_dataset
 
