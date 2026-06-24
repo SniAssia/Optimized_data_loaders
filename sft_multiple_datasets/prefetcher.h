@@ -71,7 +71,7 @@ public:
 private:
     Batch collate_and_transfer(const std::vector<int64_t>& indices) {
 
-        using CollatorItem = std::tuple
+        using CollatorItem = std::tuple<
             torch::Tensor,   // prompt_ids   [prompt_len]
             torch::Tensor,   // response_ids [response_len]
             int64_t,         // prompt_len
