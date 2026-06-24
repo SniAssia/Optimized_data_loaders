@@ -1,26 +1,6 @@
 #pragma once
 // ============================================================
 //  prefetcher.h — Parallel batch preparation + GPU prefetch
-//
-//  Architecture
-//  ────────────
-//  Producer thread:
-//    for each batch of indices from the sampler:
-//      1. fetch RawSamples from InstructionDataset (CPU RAM)
-//      2. call TrimPaddingCollator → Batch (CPU tensors)
-//      3. transfer Batch to GPU (non-blocking .to())
-//      4. push into ready_queue (bounded by prefetch_depth)
-//
-//  Consumer (training loop):
-//    calls next() → blocks until a GPU batch is ready
-//
-//  The producer runs concurrently with the training step.
-//  While GPU processes batch N, producer prepares batch N+1.
-//  This hides both CPU collation time and H2D transfer latency.
-//
-//  ready_queue depth (prefetch_depth):
-//    2 = one batch on GPU being consumed, one being prepared
-//    4 = more pipeline depth, more GPU memory used
 // ============================================================
 
 #include <atomic>
@@ -57,9 +37,7 @@ public:
     {
         batches_     = sampler.build_batches();
         num_batches_ = batches_.size();
-
-        // launch producer thread
-        producer_ = std::thread([this] { produce(); });
+        producer_    = std::thread([this] { produce(); });
     }
 
     ~CUDAPrefetcher() {
@@ -73,7 +51,6 @@ public:
             producer_.join();
     }
 
-    // Returns the next GPU-ready batch, or nullopt when epoch is done.
     std::optional<Batch> next() {
         std::unique_lock<std::mutex> lk(mu_);
         cv_consumer_.wait(lk, [&] {
@@ -85,24 +62,24 @@ public:
 
         Batch b = std::move(ready_queue_.front());
         ready_queue_.pop();
-
-        cv_producer_.notify_one();  // wake producer — slot freed
+        cv_producer_.notify_one();
         return b;
     }
 
     std::size_t num_batches() const { return num_batches_; }
 
 private:
-    // Build one Batch from a list of sample indices, transfer to device.
     Batch collate_and_transfer(const std::vector<int64_t>& indices) {
 
-        using Item = std::tuple<
-            torch::Tensor,   // prompt_ids
-            torch::Tensor,   // response_ids
-            torch::Tensor,   // attention_mask
+        // Item: prompt_ids, response_ids, prompt_len, response_len
+        // No attention_mask — built by collator at batch time
+        using Item = std::tuple
+            torch::Tensor,   // prompt_ids   [prompt_len]
+            torch::Tensor,   // response_ids [response_len]
             int64_t,         // prompt_len
             int64_t          // response_len
         >;
+
         std::vector<Item> items;
         items.reserve(indices.size());
 
@@ -111,7 +88,6 @@ private:
             items.emplace_back(
                 it.prompt_ids,
                 it.response_ids,
-                it.attention_mask,
                 it.prompt_len,
                 it.response_len);
         }
@@ -120,9 +96,6 @@ private:
 
         if (!use_cuda_) return cpu;
 
-        // Non-blocking H2D transfer on the default CUDA stream.
-        // The training loop synchronizes implicitly when it accesses
-        // the tensor data, so this is safe.
         return {
             cpu.input_ids.to(device_,      /*non_blocking=*/true),
             cpu.attention_mask.to(device_, /*non_blocking=*/true),
@@ -131,11 +104,8 @@ private:
         };
     }
 
-    // Producer thread: iterates batches_, collates, transfers, enqueues.
     void produce() {
         for (std::size_t i = 0; i < batches_.size(); ++i) {
-
-            // Wait until there is space in the ready queue
             {
                 std::unique_lock<std::mutex> lk(mu_);
                 cv_producer_.wait(lk, [&] {
@@ -150,10 +120,9 @@ private:
                 std::lock_guard<std::mutex> lk(mu_);
                 ready_queue_.push(std::move(b));
             }
-            cv_consumer_.notify_one();  // wake consumer — new batch ready
+            cv_consumer_.notify_one();
         }
 
-        // Signal end of epoch
         {
             std::lock_guard<std::mutex> lk(mu_);
             producer_done_ = true;
