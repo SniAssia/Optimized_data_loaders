@@ -134,26 +134,21 @@ def load_tokenizer(name: str) -> HFTokenizerWrapper:
         tok.pad_token_id = tok.eos_token_id
     return HFTokenizerWrapper(tok)
 
-
-# ── sample struct ────────────────────────────────────────────────────────────
 class TokenizedSample:
     """
-    A single padded sample.
-    prompt_ids and response_ids are both padded to max_seq_len.
-    attention_mask covers the CONCATENATED sequence (prompt + response portion)
-    trimmed at batch time.
-    We store separately to allow batch-level trimming.
+    A single sample — variable length, no padding.
+    prompt_ids and response_ids are stored at their real token count.
+    Padding happens at batch construction time in the C++ collator.
     """
     __slots__ = ("prompt_ids", "response_ids", "prompt_len", "response_len")
 
     def __init__(self, prompt_ids: List[int], response_ids: List[int],
                  prompt_len: int, response_len: int):
-        self.prompt_ids   = prompt_ids    # length = max_seq_len (padded)
-        self.response_ids = response_ids  # length = max_seq_len (padded)
-        self.prompt_len   = prompt_len    # real token count
-        self.response_len = response_len  # real token count
-
-
+        self.prompt_ids   = prompt_ids
+        self.response_ids = response_ids
+        self.prompt_len   = prompt_len
+        self.response_len = response_len
+        
 # ── shard writer ─────────────────────────────────────────────────────────────
 class ShardWriter:
     """
@@ -365,9 +360,9 @@ def tokenize_record(rec, tok, max_seq_len):
         was_truncated = True
 
     return TokenizedSample(
-        prompt_ids,  len(prompt_ids),
-        resp_ids,    len(resp_ids)
-    ), was_truncated
+    prompt_ids,  resp_ids,
+    len(prompt_ids), len(resp_ids)
+    ) ,    was_truncated
 
 
 # ── main pipeline ─────────────────────────────────────────────────────────────
