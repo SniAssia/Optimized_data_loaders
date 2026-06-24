@@ -71,16 +71,14 @@ public:
 private:
     Batch collate_and_transfer(const std::vector<int64_t>& indices) {
 
-        // Item: prompt_ids, response_ids, prompt_len, response_len
-        // No attention_mask — built by collator at batch time
-        using Item = std::tuple
+        using CollatorItem = std::tuple
             torch::Tensor,   // prompt_ids   [prompt_len]
             torch::Tensor,   // response_ids [response_len]
             int64_t,         // prompt_len
             int64_t          // response_len
         >;
 
-        std::vector<Item> items;
+        std::vector<CollatorItem> items;
         items.reserve(indices.size());
 
         for (auto idx : indices) {
