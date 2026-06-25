@@ -195,19 +195,25 @@ private:
 
         return result;
     }
-
-    // ── Main producer thread ────────────────────────────────────────
     void produce() {
         std::mt19937 rng(static_cast<uint64_t>(cfg_.seed + epoch_));
 
-        // shuffle shard order for this epoch
+        // ── time: shard order shuffle ─────────────────────────────
+        auto t_shuffle_start = std::chrono::high_resolution_clock::now();
+
         std::vector<int> shard_order(dataset_.num_shards());
         std::iota(shard_order.begin(), shard_order.end(), 0);
         std::shuffle(shard_order.begin(), shard_order.end(), rng);
 
-        const int W = cfg_.window_size;
+        auto t_shuffle_end = std::chrono::high_resolution_clock::now();
+        std::cout << "[producer] shard order shuffle: "
+                << std::chrono::duration<double, std::milli>(
+                        t_shuffle_end - t_shuffle_start).count()
+                << " ms  (" << shard_order.size() << " shards)\n";
 
-        // slide window over shuffled shard order
+        const int W         = cfg_.window_size;
+        int       window_idx = 0;
+
         for (int w = 0; w < static_cast<int>(shard_order.size()); w += W) {
 
             if (stop_) break;
@@ -215,7 +221,13 @@ private:
             int actual_w = std::min(W,
                 static_cast<int>(shard_order.size()) - w);
 
+            std::cout << "\n[producer] === window " << window_idx
+                    << " (shards " << w << ".." << w + actual_w - 1
+                    << " of shuffled order) ===\n";
+
             // ── Step 1: load W shards from disk in parallel ──────
+            auto t_load_start = std::chrono::high_resolution_clock::now();
+
             std::vector<std::future<std::vector<RawSample>>> load_futures;
             load_futures.reserve(actual_w);
 
@@ -228,17 +240,41 @@ private:
                         }));
             }
 
-            // collect loaded shards
             std::vector<std::vector<RawSample>> window_shards;
             window_shards.reserve(actual_w);
             for (auto& fut : load_futures)
                 window_shards.push_back(fut.get());
 
+            auto t_load_end = std::chrono::high_resolution_clock::now();
+            double load_ms = std::chrono::duration<double, std::milli>(
+                t_load_end - t_load_start).count();
+
+            int total_records = 0;
+            for (const auto& s : window_shards)
+                total_records += static_cast<int>(s.size());
+
+            std::cout << "[producer] disk load:          "
+                    << load_ms << " ms"
+                    << "  records=" << total_records
+                    << "  (" << actual_w << " shards in parallel)\n";
+
             // ── Step 2: shuffle within each shard ───────────────
+            auto t_intra_start = std::chrono::high_resolution_clock::now();
+
             for (auto& shard : window_shards)
                 std::shuffle(shard.begin(), shard.end(), rng);
 
+            auto t_intra_end = std::chrono::high_resolution_clock::now();
+            double intra_ms = std::chrono::duration<double, std::milli>(
+                t_intra_end - t_intra_start).count();
+
+            std::cout << "[producer] intra-shard shuffle: "
+                    << intra_ms << " ms"
+                    << "  (" << actual_w << " shards)\n";
+
             // ── Step 3: launch N reader threads into shared queue ─
+            auto t_batch_start = std::chrono::high_resolution_clock::now();
+
             std::size_t queue_max =
                 static_cast<std::size_t>(cfg_.batch_size) * 4;
             RecordQueue rq(queue_max, actual_w);
@@ -247,21 +283,23 @@ private:
             readers.reserve(actual_w);
             for (auto& shard : window_shards)
                 readers.emplace_back(reader_fn,
-                                     std::ref(shard), std::ref(rq));
+                                    std::ref(shard), std::ref(rq));
 
             // ── Step 4: consumer loop — accumulate batch, collate ─
             std::vector<const RawSample*> batch_buf;
             batch_buf.reserve(cfg_.batch_size);
+            int batches_this_window = 0;
 
             while (true) {
                 const RawSample* ptr = rq.pop();
 
                 if (ptr == nullptr) {
-                    // all readers done — flush partial batch
                     if (!batch_buf.empty()) {
                         auto b = collate_and_transfer(batch_buf);
-                        if (b.batch_max_len > 0)   // only push non-empty batches
+                        if (b.batch_max_len > 0) {
                             push_batch(std::move(b));
+                            ++batches_this_window;
+                        }
                         batch_buf.clear();
                     }
                     break;
@@ -271,27 +309,44 @@ private:
 
                 if (static_cast<int>(batch_buf.size()) == cfg_.batch_size) {
                     auto b = collate_and_transfer(batch_buf);
-                    if (b.batch_max_len > 0)
+                    if (b.batch_max_len > 0) {
                         push_batch(std::move(b));
+                        ++batches_this_window;
+                    }
                     batch_buf.clear();
                     if (stop_) break;
                 }
             }
 
-            // join reader threads
             for (auto& t : readers)
                 t.join();
 
-            // window_shards goes out of scope here — W shards freed
+            auto t_batch_end = std::chrono::high_resolution_clock::now();
+            double batch_ms = std::chrono::duration<double, std::milli>(
+                t_batch_end - t_batch_start).count();
+
+            std::cout << "[producer] batch construction: "
+                    << batch_ms << " ms"
+                    << "  batches=" << batches_this_window << "\n";
+
+            std::cout << "[producer] window " << window_idx << " total: "
+                    << (load_ms + intra_ms + batch_ms) << " ms"
+                    << "  breakdown:"
+                    << "  load="    << load_ms
+                    << "  shuffle=" << intra_ms
+                    << "  batches=" << batch_ms << "\n";
+
+            ++window_idx;
+            // window_shards goes out of scope here — W shards freed from RAM
         }
 
-        // signal end of epoch
         {
             std::lock_guard<std::mutex> lk(ready_mu_);
             producer_done_ = true;
         }
         ready_cv_consumer_.notify_all();
     }
+
 
     // push one batch into ready_queue (blocks if full)
     void push_batch(Batch b) {
