@@ -1,16 +1,3 @@
-// ============================================================
-//  main.cpp — Sharded Instruction DataLoader test
-//
-//  Build:
-//    cmake -B build -DCMAKE_PREFIX_PATH=/path/to/libtorch
-//    cmake --build build -j
-//
-//  Run (single dataset, sharded):
-//    ./build/dataloader_demo out_sharded/manifest.json
-//
-//  Run (multi-dataset, sharded):
-//    same — manifest.json already merges all sources
-// ============================================================
 
 #include "dataloader.h"
 #include "distributed.h"
@@ -22,10 +9,6 @@
 #include <numeric>
 #include <string>
 #include <vector>
-
-#if defined(USE_CUDA_STATS)
-#include <c10/cuda/CUDACachingAllocator.h>
-#endif
 
 static void sep(char c = '-', int w = 64) {
     std::cout << std::string(w, c) << "\n";
@@ -53,7 +36,7 @@ int main(int argc, char* argv[]) {
     sep('=', 64);
     std::cout << "\nmanifest: " << manifest_path << "\n\n";
 
-    // ── distributed init ─────────────────────────────────────────────
+    // ── distributed init ─────────────────────────────────────
     auto ctx = dl::init_distributed();
     std::cout << "rank=" << ctx.rank
               << "  world_size=" << ctx.world_size
@@ -61,31 +44,32 @@ int main(int argc, char* argv[]) {
 
     torch::Device device = ctx.device;
 
-    // ── config ───────────────────────────────────────────────────────
+    // ── config ───────────────────────────────────────────────
     dl::DataLoaderConfig cfg;
     cfg.batch_size      = 8;
     cfg.num_workers     = 2;
     cfg.prefetch_factor = 2;
+    cfg.window_size     = 4;
     cfg.shuffle         = true;
     cfg.seed            = 42;
-    // max_seq_len and pad_token_id are read from manifest.json automatically
 
-    // ── load dataset from manifest ───────────────────────────────────
-    std::cout << "Loading shards from manifest...\n";
+    // ── load dataset from manifest ───────────────────────────
+    std::cout << "Loading manifest...\n";
     dl::InstructionDataset dataset(manifest_path, cfg);
-    std::cout << "  " << dataset.size() << " samples loaded\n";
-    std::cout << "  max_seq_len  = " << dataset.config().max_seq_len << "\n";
-    std::cout << "  pad_token_id = " << dataset.config().pad_token_id << "\n\n";
+    std::cout << "  total_samples = " << dataset.total_samples() << "\n";
+    std::cout << "  num_shards    = " << dataset.num_shards()    << "\n";
+    std::cout << "  max_seq_len   = " << dataset.config().max_seq_len  << "\n";
+    std::cout << "  pad_token_id  = " << dataset.config().pad_token_id << "\n";
+    std::cout << "  window_size   = " << dataset.config().window_size  << "\n\n";
 
-    // ── build dataloader ─────────────────────────────────────────────
-    auto loader = dl::build_dataloader(
-    dataset,
-    /*epoch=*/0,
-    device);
-    std::cout << "Batches (approx): " << loader->num_batches() << "\n";
-    std::cout << "Batch size       : " << dataset.config().batch_size << "\n\n";
+    // ── build dataloader ─────────────────────────────────────
+    auto loader = dl::build_dataloader(dataset, /*epoch=*/0, device);
 
-    // ── per-batch stats ───────────────────────────────────────────────
+    int approx_batches = dataset.total_samples() / cfg.batch_size;
+    std::cout << "Batches (approx): " << approx_batches << "\n";
+    std::cout << "Batch size       : " << cfg.batch_size << "\n\n";
+
+    // ── per-batch stats ───────────────────────────────────────
     std::vector<double> pad_pcts;
     std::vector<double> seq_lens;
     std::vector<double> batch_times_ms;
@@ -116,7 +100,7 @@ int main(int argc, char* argv[]) {
 
         const auto& batch = *maybe;
         int64_t B = batch.input_ids.size(0);
-        int64_t L = batch.input_ids.size(1);   // = batch_max_len (trimmed)
+        int64_t L = batch.input_ids.size(1);
 
         float pad_mean = 1.0f -
             batch.attention_mask.to(torch::kFloat32)
@@ -138,7 +122,7 @@ int main(int argc, char* argv[]) {
             best_pad = pad_mean; best_batch = batch_count; best_len = L;
         }
 
-        if (batch_count < 5 ) {
+        if (batch_count < 5) {
             std::ostringstream shape;
             shape << "[" << B << "," << L << "]";
             std::ostringstream dev;
@@ -164,7 +148,7 @@ int main(int argc, char* argv[]) {
     auto epoch_t1 = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(epoch_t1-epoch_t0).count();
 
-    // ── summary ──────────────────────────────────────────────────────
+    // ── summary ──────────────────────────────────────────────
     std::cout << "\n";
     sep('=', 64);
     std::cout << "  EPOCH SUMMARY\n";
@@ -179,13 +163,13 @@ int main(int argc, char* argv[]) {
     double samps_s  = total_samples / total_s;
 
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "  Batches         : " << batch_count << "\n";
-    std::cout << "  Samples         : " << total_samples << "\n";
-    std::cout << "  Token slots     : " << total_tokens << "\n";
-    std::cout << "  Elapsed         : " << total_s << " s\n";
-    std::cout << "  Throughput      : " << (int)toks_s  << " tokens/s"
-              << "  |  " << (int)samps_s << " samples/s\n";
-    std::cout << "  Avg batch time  : " << avg_ms << " ms\n";
+    std::cout << "  Batches         : " << batch_count    << "\n";
+    std::cout << "  Samples         : " << total_samples  << "\n";
+    std::cout << "  Token slots     : " << total_tokens   << "\n";
+    std::cout << "  Elapsed         : " << total_s        << " s\n";
+    std::cout << "  Throughput      : " << (int)toks_s    << " tokens/s"
+              << "  |  "               << (int)samps_s   << " samples/s\n";
+    std::cout << "  Avg batch time  : " << avg_ms         << " ms\n";
 
     sep();
     std::cout << "  SEQUENCE LENGTH (trimmed per batch)\n";
@@ -203,9 +187,11 @@ int main(int argc, char* argv[]) {
     std::cout << "  Mean  : " << (avg_pad * 100.0) << "%\n";
     std::cout << "  Std   : " << (std_pad * 100.0) << "%\n";
     std::cout << "  Worst : " << (worst_pad * 100.0) << "%"
-              << "  (batch " << worst_batch << ", trimmed_len=" << worst_len << ")\n";
+              << "  (batch " << worst_batch
+              << ", trimmed_len=" << worst_len << ")\n";
     std::cout << "  Best  : " << (best_pad  * 100.0) << "%"
-              << "  (batch " << best_batch  << ", trimmed_len=" << best_len  << ")\n";
+              << "  (batch " << best_batch
+              << ", trimmed_len=" << best_len  << ")\n";
 
     sep('=', 64);
     std::cout << "  test passed.\n";
