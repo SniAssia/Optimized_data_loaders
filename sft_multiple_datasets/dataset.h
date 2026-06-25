@@ -10,23 +10,23 @@
 //      uint32  response_ids[response_len]
 //
 //  No padding on disk. No attention mask on disk.
-//  Padding and attention mask are built at batch time in collator.h
+//  Padding and attention mask built at batch time in collator.h
 
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <numeric>
 
 #include <torch/torch.h>
 
 namespace dl {
 
 struct RawSample {
-    std::vector<int32_t> prompt_ids;    // real tokens only
-    std::vector<int32_t> response_ids;  // real tokens only
+    std::vector<int32_t> prompt_ids;
+    std::vector<int32_t> response_ids;
     uint16_t prompt_len   = 0;
     uint16_t response_len = 0;
 
@@ -50,10 +50,12 @@ struct DataLoaderConfig {
     int32_t batch_size      = 8;
     int32_t num_workers     = 4;
     int32_t prefetch_factor = 2;
+    int32_t window_size     = 4;    // shards loaded simultaneously
     bool    shuffle         = true;
     int64_t seed            = 42;
 };
 
+// Low-level binary reader
 namespace detail {
 
 template<typename T>
@@ -62,8 +64,7 @@ static void read_pod(std::ifstream& f, T& out) {
     if (!f) throw std::runtime_error("Unexpected EOF in binary file");
 }
 
-static std::vector<RawSample> read_samples_bin(
-    const std::string& path, int32_t /*max_seq_len*/)
+static std::vector<RawSample> read_samples_bin(const std::string& path)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open: " + path);
@@ -77,7 +78,6 @@ static std::vector<RawSample> read_samples_bin(
     for (uint32_t i = 0; i < n_samples; ++i) {
         RawSample s;
 
-        // prompt: length then token ids
         uint16_t prompt_len;
         read_pod(f, prompt_len);
         s.prompt_len = prompt_len;
@@ -87,7 +87,6 @@ static std::vector<RawSample> read_samples_bin(
             s.prompt_ids[j] = static_cast<int32_t>(tok);
         }
 
-        // response: length then token ids
         uint16_t response_len;
         read_pod(f, response_len);
         s.response_len = response_len;
@@ -175,10 +174,14 @@ inline Manifest parse(const std::string& path) {
 
 } // namespace manifest_parser
 
+// ─────────────────────────────────────────────────────────────
 // InstructionDataset
+// Lightweight — stores only manifest metadata.
+// Does NOT load any samples at construction time.
+// load_shard(idx) loads one shard on demand.
+// ─────────────────────────────────────────────────────────────
 class InstructionDataset {
 public:
-
     explicit InstructionDataset(const std::string& manifest_path,
                                  const DataLoaderConfig& cfg)
         : cfg_(cfg)
@@ -186,36 +189,30 @@ public:
         auto manifest    = manifest_parser::parse(manifest_path);
         cfg_.max_seq_len  = manifest.max_seq_len;
         cfg_.pad_token_id = manifest.pad_token_id;
+        shards_           = manifest.shards;
 
-        for (const auto& shard : manifest.shards) {
-            std::string samples_path = shard.dir + "/samples.bin";
-            auto shard_samples = detail::read_samples_bin(
-                samples_path, cfg_.max_seq_len);
-            for (auto& s : shard_samples)
-                samples_.push_back(std::move(s));
-        }
+        total_samples_ = 0;
+        for (const auto& s : shards_)
+            total_samples_ += s.n_samples;
 
-        lengths_.reserve(samples_.size());
-        for (const auto& s : samples_)
-            lengths_.push_back(
-                std::min(s.total_real_len(), cfg_.max_seq_len));
+        std::cout << "[InstructionDataset] "
+                  << shards_.size() << " shards, "
+                  << total_samples_ << " total samples "
+                  << "(nothing loaded into RAM yet)\n";
     }
 
-    InstructionDataset(std::vector<RawSample> samples,
-                        const DataLoaderConfig& cfg)
-        : cfg_(cfg), samples_(std::move(samples))
-    {
-        lengths_.reserve(samples_.size());
-        for (const auto& s : samples_)
-            lengths_.push_back(
-                std::min(s.total_real_len(), cfg_.max_seq_len));
+    // Load one shard from disk — called by prefetcher per window
+    std::vector<RawSample> load_shard(int shard_idx) const {
+        const auto& entry = shards_[static_cast<std::size_t>(shard_idx)];
+        std::string path  = entry.dir + "/samples.bin";
+        return detail::read_samples_bin(path);
     }
 
-    std::size_t size()    const { return samples_.size(); }
-    const std::vector<int32_t>& lengths() const { return lengths_; }
-    const DataLoaderConfig&     config()  const { return cfg_; }
+    int  num_shards()     const { return static_cast<int>(shards_.size()); }
+    int  total_samples()  const { return total_samples_; }
+    const DataLoaderConfig& config() const { return cfg_; }
 
-    // ── Item: real tokens only, no padding ───────────────────
+    // Item type used by collator
     struct Item {
         torch::Tensor prompt_ids;    // [prompt_len]
         torch::Tensor response_ids;  // [response_len]
@@ -223,9 +220,8 @@ public:
         int64_t       response_len;
     };
 
-    Item get(int64_t idx) const {
-        const auto& s = samples_[static_cast<std::size_t>(idx)];
-
+    // Convert one RawSample to tensors (called inside collator)
+    static Item to_item(const RawSample& s) {
         auto t_prompt = torch::from_blob(
             const_cast<int32_t*>(s.prompt_ids.data()),
             {static_cast<int64_t>(s.prompt_len)},
@@ -247,9 +243,9 @@ public:
     }
 
 private:
-    DataLoaderConfig       cfg_;
-    std::vector<RawSample> samples_;
-    std::vector<int32_t>   lengths_;
+    DataLoaderConfig         cfg_;
+    std::vector<ShardEntry>  shards_;
+    int                      total_samples_ = 0;
 };
 
 } // namespace dl

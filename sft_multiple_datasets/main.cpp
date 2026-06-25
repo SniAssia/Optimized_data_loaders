@@ -79,10 +79,9 @@ int main(int argc, char* argv[]) {
 
     // ── build dataloader ─────────────────────────────────────────────
     auto loader = dl::build_dataloader(
-        dataset, dataset.config(),
-        ctx.rank, ctx.world_size,
-        /*epoch=*/0, device);
-
+    dataset,
+    /*epoch=*/0,
+    device);
     std::cout << "Batches (approx): " << loader->num_batches() << "\n";
     std::cout << "Batch size       : " << dataset.config().batch_size << "\n\n";
 
