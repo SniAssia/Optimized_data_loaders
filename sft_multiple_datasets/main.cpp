@@ -138,7 +138,7 @@ int main(int argc, char* argv[]) {
             best_pad = pad_mean; best_batch = batch_count; best_len = L;
         }
 
-        if (batch_count < 5 || batch_count >= loader->num_batches() - 2) {
+        if (batch_count < 5 ) {
             std::ostringstream shape;
             shape << "[" << B << "," << L << "]";
             std::ostringstream dev;
