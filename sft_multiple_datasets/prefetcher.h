@@ -147,6 +147,13 @@ private:
     Batch collate_and_transfer(
     const std::vector<const RawSample*>& ptrs)
     {
+        if (ptrs.empty()) {
+            // return empty sentinel batch — will be filtered by consumer
+            return { torch::zeros({0,0}, torch::kInt64),
+                    torch::zeros({0,0}, torch::kInt64),
+                    torch::zeros({0,0}, torch::kInt64),
+                    0 };
+        }
         using CollatorItem = std::tuple
             torch::Tensor,   // prompt_ids   [prompt_len]
             torch::Tensor,   // response_ids [response_len]
@@ -252,7 +259,9 @@ private:
                 if (ptr == nullptr) {
                     // all readers done — flush partial batch
                     if (!batch_buf.empty()) {
-                        push_batch(collate_and_transfer(batch_buf));
+                        auto b = collate_and_transfer(batch_buf);
+                        if (b.batch_max_len > 0)   // only push non-empty batches
+                            push_batch(std::move(b));
                         batch_buf.clear();
                     }
                     break;
@@ -261,7 +270,9 @@ private:
                 batch_buf.push_back(ptr);
 
                 if (static_cast<int>(batch_buf.size()) == cfg_.batch_size) {
-                    push_batch(collate_and_transfer(batch_buf));
+                    auto b = collate_and_transfer(batch_buf);
+                    if (b.batch_max_len > 0)
+                        push_batch(std::move(b));
                     batch_buf.clear();
                     if (stop_) break;
                 }
@@ -284,6 +295,7 @@ private:
 
     // push one batch into ready_queue (blocks if full)
     void push_batch(Batch b) {
+        if (b.batch_max_len == 0) return;   // ← discard empty batches
         std::unique_lock<std::mutex> lk(ready_mu_);
         ready_cv_producer_.wait(lk, [&] {
             return stop_ || ready_queue_.size() < prefetch_depth_;
