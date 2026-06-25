@@ -99,6 +99,7 @@ int main(int argc, char* argv[]) {
         auto bt0 = std::chrono::high_resolution_clock::now();
 
         const auto& batch = *maybe;
+        if (batch.batch_max_len == 0) continue;  
         int64_t B = batch.input_ids.size(0);
         int64_t L = batch.input_ids.size(1);
 
