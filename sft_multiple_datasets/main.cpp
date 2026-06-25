@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
 
     // ── config ───────────────────────────────────────────────
     dl::DataLoaderConfig cfg;
-    cfg.batch_size      = 8;
+    cfg.batch_size      = 64;
     cfg.num_workers     = 2;
     cfg.prefetch_factor = 2;
     cfg.window_size     = 4;
