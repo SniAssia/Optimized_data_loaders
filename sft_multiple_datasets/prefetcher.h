@@ -16,7 +16,7 @@
 //    N shards in memory  ≈ N × shard_size × avg_record_size
 //    shared_queue        ≈ 4 × batch_size records
 //    ready_queue         ≈ prefetch_depth Batch objects (CPU)
-
+#include <chrono>
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -145,7 +145,7 @@ private:
 
     // ── Collate batch_size raw samples → padded Batch on device ────
     Batch collate_and_transfer(
-        const std::vector<const RawSample*>& ptrs)
+    const std::vector<const RawSample*>& ptrs)
     {
         using CollatorItem = std::tuple
             torch::Tensor,   // prompt_ids   [prompt_len]
@@ -166,16 +166,27 @@ private:
                 item.response_len);
         }
 
+        // ── time collation + H2D transfer ────────────────────────
+        auto t0 = std::chrono::high_resolution_clock::now();
+
         Batch cpu = collator_(items);
 
-        if (!use_cuda_) return cpu;
+        Batch result = cpu;
+        if (use_cuda_) {
+            result = {
+                cpu.input_ids.to(device_,      /*non_blocking=*/true),
+                cpu.attention_mask.to(device_, /*non_blocking=*/true),
+                cpu.labels.to(device_,         /*non_blocking=*/true),
+                cpu.batch_max_len,
+            };
+        }
 
-        return {
-            cpu.input_ids.to(device_,      /*non_blocking=*/true),
-            cpu.attention_mask.to(device_, /*non_blocking=*/true),
-            cpu.labels.to(device_,         /*non_blocking=*/true),
-            cpu.batch_max_len,
-        };
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+        std::cout << "[producer] collate+transfer: " << ms << " ms  "
+                << "batch_max_len=" << result.batch_max_len << "\n";
+
+        return result;
     }
 
     // ── Main producer thread ────────────────────────────────────────
