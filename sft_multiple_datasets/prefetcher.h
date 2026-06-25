@@ -16,6 +16,7 @@
 //    N shards in memory  ≈ N × shard_size × avg_record_size
 //    shared_queue        ≈ 4 × batch_size records
 //    ready_queue         ≈ prefetch_depth Batch objects (CPU)
+#include <iomanip>
 #include <chrono>
 #include <algorithm>
 #include <atomic>
@@ -198,18 +199,30 @@ private:
     void produce() {
         std::mt19937 rng(static_cast<uint64_t>(cfg_.seed + epoch_));
 
+        // ── epoch-level accumulators ──────────────────────────────
+        double total_shuffle_ms  = 0.0;
+        double total_load_ms     = 0.0;
+        double total_intra_ms    = 0.0;
+        double total_batch_ms    = 0.0;
+        int    total_windows     = 0;
+        int    total_batches     = 0;
+        int    total_records_proc = 0;
+
+        auto epoch_start = std::chrono::high_resolution_clock::now();
+
         // ── time: shard order shuffle ─────────────────────────────
-        auto t_shuffle_start = std::chrono::high_resolution_clock::now();
+        auto t0 = std::chrono::high_resolution_clock::now();
 
         std::vector<int> shard_order(dataset_.num_shards());
         std::iota(shard_order.begin(), shard_order.end(), 0);
         std::shuffle(shard_order.begin(), shard_order.end(), rng);
 
-        auto t_shuffle_end = std::chrono::high_resolution_clock::now();
+        total_shuffle_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+
         std::cout << "[producer] shard order shuffle: "
-                << std::chrono::duration<double, std::milli>(
-                        t_shuffle_end - t_shuffle_start).count()
-                << " ms  (" << shard_order.size() << " shards)\n";
+                << total_shuffle_ms << " ms"
+                << "  (" << shard_order.size() << " shards)\n";
 
         const int W         = cfg_.window_size;
         int       window_idx = 0;
@@ -226,11 +239,10 @@ private:
                     << " of shuffled order) ===\n";
 
             // ── Step 1: load W shards from disk in parallel ──────
-            auto t_load_start = std::chrono::high_resolution_clock::now();
+            auto t_load = std::chrono::high_resolution_clock::now();
 
             std::vector<std::future<std::vector<RawSample>>> load_futures;
             load_futures.reserve(actual_w);
-
             for (int k = 0; k < actual_w; ++k) {
                 int sidx = shard_order[w + k];
                 load_futures.push_back(
@@ -245,35 +257,36 @@ private:
             for (auto& fut : load_futures)
                 window_shards.push_back(fut.get());
 
-            auto t_load_end = std::chrono::high_resolution_clock::now();
             double load_ms = std::chrono::duration<double, std::milli>(
-                t_load_end - t_load_start).count();
+                std::chrono::high_resolution_clock::now() - t_load).count();
+            total_load_ms += load_ms;
 
-            int total_records = 0;
+            int window_records = 0;
             for (const auto& s : window_shards)
-                total_records += static_cast<int>(s.size());
+                window_records += static_cast<int>(s.size());
+            total_records_proc += window_records;
 
-            std::cout << "[producer] disk load:          "
+            std::cout << "[producer] disk load:           "
                     << load_ms << " ms"
-                    << "  records=" << total_records
+                    << "  records=" << window_records
                     << "  (" << actual_w << " shards in parallel)\n";
 
             // ── Step 2: shuffle within each shard ───────────────
-            auto t_intra_start = std::chrono::high_resolution_clock::now();
+            auto t_intra = std::chrono::high_resolution_clock::now();
 
             for (auto& shard : window_shards)
                 std::shuffle(shard.begin(), shard.end(), rng);
 
-            auto t_intra_end = std::chrono::high_resolution_clock::now();
             double intra_ms = std::chrono::duration<double, std::milli>(
-                t_intra_end - t_intra_start).count();
+                std::chrono::high_resolution_clock::now() - t_intra).count();
+            total_intra_ms += intra_ms;
 
             std::cout << "[producer] intra-shard shuffle: "
                     << intra_ms << " ms"
                     << "  (" << actual_w << " shards)\n";
 
-            // ── Step 3: launch N reader threads into shared queue ─
-            auto t_batch_start = std::chrono::high_resolution_clock::now();
+            // ── Step 3: reader threads + batch construction ──────
+            auto t_batch = std::chrono::high_resolution_clock::now();
 
             std::size_t queue_max =
                 static_cast<std::size_t>(cfg_.batch_size) * 4;
@@ -285,7 +298,6 @@ private:
                 readers.emplace_back(reader_fn,
                                     std::ref(shard), std::ref(rq));
 
-            // ── Step 4: consumer loop — accumulate batch, collate ─
             std::vector<const RawSample*> batch_buf;
             batch_buf.reserve(cfg_.batch_size);
             int batches_this_window = 0;
@@ -321,11 +333,12 @@ private:
             for (auto& t : readers)
                 t.join();
 
-            auto t_batch_end = std::chrono::high_resolution_clock::now();
             double batch_ms = std::chrono::duration<double, std::milli>(
-                t_batch_end - t_batch_start).count();
+                std::chrono::high_resolution_clock::now() - t_batch).count();
+            total_batch_ms  += batch_ms;
+            total_batches   += batches_this_window;
 
-            std::cout << "[producer] batch construction: "
+            std::cout << "[producer] batch construction:  "
                     << batch_ms << " ms"
                     << "  batches=" << batches_this_window << "\n";
 
@@ -337,15 +350,62 @@ private:
                     << "  batches=" << batch_ms << "\n";
 
             ++window_idx;
-            // window_shards goes out of scope here — W shards freed from RAM
+            ++total_windows;
         }
 
+        // ── epoch summary ─────────────────────────────────────────
+        double epoch_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - epoch_start).count();
+
+        double total_pipeline_ms = total_shuffle_ms
+                                + total_load_ms
+                                + total_intra_ms
+                                + total_batch_ms;
+
+        std::cout << "=========\n";
+        std::cout << "      PRODUCER EPOCH TIMING SUMMARY           ║\n";
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << " Windows processed   : " << total_windows     << "\n";
+        std::cout << "  Total batches       : " << total_batches      << "\n";
+        std::cout << "  Total records       : " << total_records_proc << "\n";
+        std::cout << "  PHASE BREAKDOWN\n";
+        std::cout << " shard order shuffle : " << total_shuffle_ms
+                << " ms  ("
+                << (100.0 * total_shuffle_ms / total_pipeline_ms)
+                << "%)\n";
+        std::cout << " disk load (parallel): " << total_load_ms
+                << " ms  ("
+                << (100.0 * total_load_ms / total_pipeline_ms)
+                << "%)\n";
+        std::cout << "  intra-shard shuffle : " << total_intra_ms
+                << " ms  ("
+                << (100.0 * total_intra_ms / total_pipeline_ms)
+                << "%)\n";
+        std::cout << "  batch construction  : " << total_batch_ms
+                << " ms  ("
+                << (100.0 * total_batch_ms / total_pipeline_ms)
+                << "%)\n";
+        std::cout << "\n";
+        std::cout << "  Pipeline total      : " << total_pipeline_ms << " ms\n";
+        std::cout << "  Epoch wall time     : " << epoch_ms          << " ms\n";
+        std::cout << "  Overhead (queue/sync): "
+                << (epoch_ms - total_pipeline_ms) << " ms  ("
+                << (100.0 * (epoch_ms - total_pipeline_ms) / epoch_ms)
+                << "%)\n";
+        std::cout << "║\n";
+        std::cout << " Throughput\n";
+        std::cout << "  records/s : "
+                << (int)(total_records_proc / (epoch_ms / 1000.0)) << "\n";
+        std::cout << "  batches/s : "
+                << (int)(total_batches / (epoch_ms / 1000.0)) << "\n";
+        std::cout << "═════════════\n";
         {
             std::lock_guard<std::mutex> lk(ready_mu_);
             producer_done_ = true;
         }
         ready_cv_consumer_.notify_all();
     }
+    
 
 
     // push one batch into ready_queue (blocks if full)
