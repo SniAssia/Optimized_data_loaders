@@ -1,22 +1,20 @@
 #pragma once
-// ============================================================
 //  libtorch_dataloader.h — LibTorch DataLoader with shard cache
 //  + full benchmark instrumentation
 //
 //  Metrics tracked
-//  ───────────────
 //  Per shard load:
-//    disk_read_ms     — time to read samples.bin from disk
-//    parse_ms         — time to parse binary format into RawSample
-//    cache_hits       — shard already in RAM
-//    cache_misses     — shard loaded from disk
+//    disk_read_ms  — time to read samples.bin from disk
+//    parse_ms     — time to parse binary format into RawSample
+//    cache_hits      — shard already in RAM
+//    cache_misses          — shard loaded from disk
 //
 //  Per batch:
-//    collate_ms       — time to pad + build tensors on CPU
-//    h2d_ms           — time to transfer batch to GPU
+//    collate_ms  — time to pad + build tensors on CPU
+//    h2d_ms  — time to transfer batch to GPU
 //    total_batch_ms   — collate + h2d
-//    batch_max_len    — trimmed sequence length
-//    pad_pct          — padding percentage
+//    batch_max_len — trimmed sequence length
+//    pad_pct  — padding percentage
 //
 //  Per epoch:
 //    total_disk_ms    — total disk read time across all shard loads
@@ -55,10 +53,7 @@
 #include "dataset.h"
 
 namespace dl {
-
-// ─────────────────────────────────────────────────────────────
 // BenchmarkStats — accumulated across one epoch
-// ─────────────────────────────────────────────────────────────
 struct BenchmarkStats {
     // shard loading
     std::atomic<int64_t> cache_hits{0};
@@ -258,9 +253,7 @@ struct BenchmarkStats {
 // global stats object — shared between ShardCache, CollateFunction, main loop
 static BenchmarkStats g_stats;
 
-// ─────────────────────────────────────────────────────────────
 // ShardCache — LRU cache with benchmark instrumentation
-// ─────────────────────────────────────────────────────────────
 class ShardCache {
 public:
     explicit ShardCache(int capacity, const std::vector<ShardEntry>& shards)
@@ -284,7 +277,7 @@ public:
             cache_.erase(evict);
         }
 
-        // ── measure disk read ────────────────────────────────
+        //measure disk read 
         const std::string path = shards_[shard_idx].dir + "/samples.bin";
 
         int64_t disk_bytes = 0;
