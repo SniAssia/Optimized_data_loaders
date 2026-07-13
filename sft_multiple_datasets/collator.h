@@ -31,7 +31,7 @@ public:
         : pad_id_(pad_token_id), max_seq_len_(max_seq_len) {}
 
     // items: vector of (prompt_ids[prompt_len], response_ids[response_len],
-    //                   prompt_len, response_len)
+    //   prompt_len, response_len)
     // No attention_mask in input — built here from real lengths.
     Batch operator()(
         const std::vector<std::tuple
@@ -52,7 +52,7 @@ public:
         batch_max_len = std::min(batch_max_len,
                                   static_cast<int64_t>(max_seq_len_));
 
-        // ── Step 2: allocate output tensors ───────────────────
+        //  Step 2: allocate output tensors 
         auto input_ids      = torch::full(
             {B, batch_max_len}, pad_id_, torch::kInt64);
         auto attention_mask = torch::zeros(

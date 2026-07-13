@@ -41,6 +41,7 @@
 #include <list>
 #include <mutex>
 #include <numeric>
+#include <cstdlib>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -68,6 +69,7 @@ struct BenchmarkStats {
     std::atomic<double>  total_h2d_ms{0};
     std::atomic<int64_t> total_batches{0};
     std::atomic<int64_t> total_samples{0};
+    std::atomic<int64_t> total_real_tokens{0}; 
     std::atomic<int64_t> total_token_slots{0};
     std::atomic<double>  total_pad_pct{0};
     std::atomic<int64_t> total_vram_bytes{0};
@@ -86,6 +88,7 @@ struct BenchmarkStats {
         total_h2d_ms      = 0;
         total_batches     = 0;
         total_samples     = 0;
+        total_real_tokens = 0;  
         total_token_slots = 0;
         total_pad_pct     = 0;
         total_vram_bytes  = 0;
@@ -112,12 +115,13 @@ struct BenchmarkStats {
 
     void add_batch(double collate_ms, double h2d_ms,
                    int64_t B, int64_t L, double pad_pct,
-                   int64_t vram_bytes) {
+                   int64_t vram_bytes, int64_t real_tokens) {   
         atomic_add(total_collate_ms, collate_ms);
         atomic_add(total_h2d_ms,     h2d_ms);
         ++total_batches;
         total_samples     += B;
         total_token_slots += B * L;
+        total_real_tokens += real_tokens;                        
         atomic_add(total_pad_pct, pad_pct);
         total_vram_bytes  += vram_bytes;
     }
@@ -184,6 +188,26 @@ struct BenchmarkStats {
                       ? total_collate_ms.load() / total_batches : 0.0)
                   << " ms\n";
         std::cout << "  Avg padding          : " << avg_pad << "%\n";
+        // ── PROXY TRAINING TIME (no real training) ─────────────
+        // Estimates one-epoch train time assuming step time scales with padded
+        // tokens: proxy = alpha*padded + beta*batches. alpha=1,beta=0 => padded
+        // tokens (comparable unit). Set PROXY_ALPHA (sec/token) to get seconds.
+        {
+            double alpha = 1.0, beta = 0.0;
+            if (const char* a = std::getenv("PROXY_ALPHA")) alpha = std::atof(a);
+            if (const char* b = std::getenv("PROXY_BETA"))  beta  = std::atof(b);
+            int64_t padded = total_token_slots.load();
+            int64_t real   = total_real_tokens.load();
+            double  ppct   = padded > 0 ? 100.0*(padded-real)/padded : 0.0;
+            double  proxy  = alpha*(double)padded + beta*(double)total_batches.load();
+            std::cout << "\n  ── PROXY TRAINING TIME (no real training) ─────────\n";
+            std::cout << "  Padded tokens        : " << padded << "\n";
+            std::cout << "  Real (useful) tokens : " << real   << "\n";
+            std::cout << "  Padding %            : " << ppct   << "%\n";
+            std::cout << "  Proxy train time     : " << std::fixed << proxy
+                      << "  (alpha=" << alpha << ", beta=" << beta << ")\n";
+            std::cout << "  Proxy train time (h) : " << proxy/3600.0 << "\n";
+        }
 
         std::cout << "\n  ── GPU TRANSFER (H2D) ─────────────────────────────\n";
         std::cout << "  Total H2D time       : "
@@ -583,8 +607,8 @@ struct CollateFunction {
         // batch VRAM: 3 tensors × B × batch_max_len × 8 bytes
         int64_t vram_bytes = 3 * B * batch_max_len * 8;
         g_stats.add_batch(collate_ms, 0.0,
-                          B, batch_max_len, pad_pct, vram_bytes);
-
+                          B, batch_max_len, pad_pct, vram_bytes,
+                          total_real);                           
         return {input_ids, attention_mask, labels, batch_max_len};
     }
 };
