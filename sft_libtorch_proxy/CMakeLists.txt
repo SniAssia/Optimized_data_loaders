@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Torch REQUIRED)
 
 # ── original custom pipeline ──────────────────────────────────
-add_executable(dataloader_demo main.cpp)
+add_executable(dataloader_demo main_libtorch.cpp)
 target_include_directories(dataloader_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dataloader_demo PRIVATE "${TORCH_LIBRARIES}")
 target_compile_options(dataloader_demo PRIVATE ${TORCH_CXX_FLAGS})
