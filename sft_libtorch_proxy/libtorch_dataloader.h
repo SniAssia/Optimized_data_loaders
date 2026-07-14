@@ -446,7 +446,8 @@ public:
         return b;
     }
 
-    std::size_t size() const override { return total_; }
+    std::size_t size() const { return total_; }
+
     void save(torch::serialize::OutputArchive& archive) const override {
         // No checkpointable sampler state yet — no-op satisfies the pure virtual.
     }
@@ -552,14 +553,26 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
+// Batch — collated tensors returned by CollateFunction
+// ─────────────────────────────────────────────────────────────
+struct Batch {
+    torch::Tensor input_ids;
+    torch::Tensor attention_mask;
+    torch::Tensor labels;
+    int64_t       batch_max_len;
+};
+
+// ─────────────────────────────────────────────────────────────
 // CollateFunction — with collation timing
 // ─────────────────────────────────────────────────────────────
-struct CollateFunction : public torch::data::transforms::BatchTransform
-          std::vector<InstructionDataset::Item>, Batch> {
+struct CollateFunction {
+    using InputBatchType  = std::vector<InstructionDataset::Item>;
+    using OutputBatchType = Batch;
+
     int64_t pad_id;
     int32_t max_seq_len;
 
-    Batch operator()(
+    Batch apply_batch(
         std::vector<InstructionDataset::Item> items) const
     {
         const int64_t B = static_cast<int64_t>(items.size());
@@ -624,6 +637,9 @@ struct CollateFunction : public torch::data::transforms::BatchTransform
     }
 };
 
+// ─────────────────────────────────────────────────────────────
+// build_libtorch_dataloader
+// ─────────────────────────────────────────────────────────────
 auto build_libtorch_dataloader(
     ShardedDataset& dataset,
     int64_t         epoch  = 0,
