@@ -447,6 +447,13 @@ public:
     }
 
     std::size_t size() const override { return total_; }
+    void save(torch::serialize::OutputArchive& archive) const override {
+        // No checkpointable sampler state yet — no-op satisfies the pure virtual.
+    }
+
+    void load(torch::serialize::InputArchive& archive) override {
+        // No checkpointable sampler state yet — no-op satisfies the pure virtual.
+    }
 
 private:
     void build() {
