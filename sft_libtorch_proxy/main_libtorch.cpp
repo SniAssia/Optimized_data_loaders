@@ -138,11 +138,11 @@ int main(int argc, char* argv[]) {
             t_h2d1 - t_h2d0).count();
 
         // record H2D time in stats
-        BenchmarkStats::atomic_add(dl::g_stats.total_h2d_ms, h2d_ms);
+        dl::BenchmarkStats::atomic_add(dl::g_stats.total_h2d_ms, h2d_ms);
 
         float pad_mean = 1.0f -
-            attention_mask.to(torch::kFloat32)
-                          .mean().template item<float>();
+             attention_mask.to(torch::kFloat32)
+                  .mean().item<float>();
 
         total_tokens  += B * L;
         total_samples += B;

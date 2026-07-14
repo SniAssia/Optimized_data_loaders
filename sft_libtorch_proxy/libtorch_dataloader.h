@@ -554,7 +554,8 @@ private:
 // ─────────────────────────────────────────────────────────────
 // CollateFunction — with collation timing
 // ─────────────────────────────────────────────────────────────
-struct CollateFunction {
+struct CollateFunction : public torch::data::transforms::BatchTransform
+          std::vector<InstructionDataset::Item>, Batch> {
     int64_t pad_id;
     int32_t max_seq_len;
 
@@ -623,9 +624,6 @@ struct CollateFunction {
     }
 };
 
-// ─────────────────────────────────────────────────────────────
-// build_libtorch_dataloader
-// ─────────────────────────────────────────────────────────────
 auto build_libtorch_dataloader(
     ShardedDataset& dataset,
     int64_t         epoch  = 0,
